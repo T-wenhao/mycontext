@@ -233,6 +233,24 @@ data directory is left half-swapped. Two facts make this safe to recover from:
   `knowledge.db` is healthy (restore succeeded, only cleanup was interrupted), it
   logs a warning about the leftovers and starts normally without touching disk.
 
+The guard's decision is a function of two facts only — whether leftover
+`*.restore-old-*` copies exist, and whether the live `knowledge.db` is usable
+(opened read-only so the probe itself never auto-creates a file, then
+`PRAGMA quick_check` + presence of the core `chunks` table):
+
+| Leftover `*.restore-old-*` | Live `knowledge.db` | Startup |
+|----------------------------|---------------------|---------|
+| none | any | **Normal start** — no interrupted restore to recover. |
+| present | healthy (real DB, `chunks` present) | **Warn + start**, disk untouched — restore succeeded, only cleanup was interrupted; operator removes the leftovers when convenient. |
+| present | missing | **Refuse + print recovery steps** — killed after move-aside, before the copy landed. |
+| present | empty (auto-created, no `chunks` table) | **Refuse** — this is the exact silent-empty-boot trap the guard exists to stop. |
+| present | corrupt / truncated / half-copied | **Refuse** — killed mid-copy; the target is a partial file. |
+
+The guard **never mutates disk** — it only reads, then either starts or refuses.
+Recovery (below) is manual and deliberate, because the operator, not the server,
+decides which copy is authoritative. This matrix is exercised against real DB
+bytes in `tests/unit/test_interrupted_restore_guard.py`.
+
 **Recovery when the guard refuses to start** (all under the data directory):
 1. Delete the partially-copied target(s) — `knowledge.db` and any snapshot files
    the interrupted restore had just copied in.
@@ -252,6 +270,27 @@ the active vector store keeps local files, i.e. not a remote qdrant) — checked
 failed (rolled back, stores reopened on original data).
 
 `src_dir` is **never logged** (AGENTS.md §1).
+
+### Backup / restore failure modes at a glance
+
+Both endpoints fail **loudly and recoverably** — never a half-written snapshot,
+never a wedged `ready=False`, never a silent empty boot (AGENTS.md §4). One
+reference for every way a backup or restore can go wrong:
+
+| When | What went wrong | What the server does | Left on disk |
+|------|-----------------|----------------------|--------------|
+| Backup | `dest_dir` not absolute, or already holds snapshot files | `400` before any copy | caller's `dest_dir` untouched |
+| Backup | insufficient disk headroom (need × 1.1 pre-check) | `500`, no copy attempted | only this request's artifacts removed; caller's other files kept |
+| Backup | copy fails mid-way | `500`, half-written targets removed | caller's unrelated files kept; barrier cleared in `finally` |
+| Backup | an ingest/improve job is active, or another backup/restore is running | `409`, no action | live stores untouched |
+| Restore | `src_dir` not absolute / not a dir / missing a required element | `400` **before** quiesce | handles never closed, live data untouched |
+| Restore | an ingest/improve job is active, or a backup/restore is running | `409`, no action | live stores untouched |
+| Restore | copy or reopen fails (e.g. corrupt snapshot) | rolls back move-aside, reopens on original data, then `500` | originals restored; no `*.restore-old-*` leftovers; barrier cleared |
+| Restore | process **killed** mid-swap (SIGKILL / OOM / power loss) | in-memory barrier lost; next start runs the interrupted-restore guard (matrix above) | originals survive as `*.restore-old-*`; manual recovery |
+
+The only case needing manual intervention is the last one — a hard kill during
+the swap window. Every *handled* error (400/409/500) leaves the server running on
+its original data with no leftovers.
 
 ### Who owns what
 
