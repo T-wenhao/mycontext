@@ -235,6 +235,82 @@ def test_restore_copy_failure_rolls_back_and_reopens(
     state.qdrant_main.close()
 
 
+# ─── Bootstrap failure after file-swap → rollback to old data (P1 #60) ───────
+
+
+@skip_no_zvec
+def test_restore_bootstrap_failure_rolls_back_to_old_data(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """文件已换好、但重开（_bootstrap_stores）失败：必须回滚到原数据并重开 ready。
+
+    这是 #60 的核心：旧的实现会在 bootstrap 之前删掉 .restore-old-*，一旦快照损坏
+    导致 bootstrap 失败，原数据已丢、服务卡死。现在 bootstrap 成功前不删 move-aside。
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state = kl_server.ServerState()
+    state.ready = True
+    state.startup_time = 0
+    monkeypatch.setattr(kl_server, "state", state)
+    _force_sqlite_backend(monkeypatch)
+
+    _open_stores(data_dir, state)
+    _seed_entity(state, "FAKEENT0001", "张三")  # 原数据计数 1
+    _seed_vector(state, "FAKECHUNK0001")
+
+    snap = tmp_path / "snap"
+    asyncio.run(kl_server.ingest_backup(kl_server.BackupRequest(dest_dir=str(snap))))
+
+    # bootstrap 第一次调用（换文件后重开新数据）抛错；回滚里的第二次调用要成功。
+    real_bootstrap = _open_stores
+    calls = {"n": 0}
+
+    def _bootstrap_first_fails() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated corrupt-snapshot open failure")
+        real_bootstrap(data_dir, kl_server.state)
+
+    monkeypatch.setattr(kl_server, "_bootstrap_stores", _bootstrap_first_fails)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            kl_server.ingest_restore(kl_server.RestoreRequest(src_dir=str(snap)))
+        )
+
+    assert exc.value.status_code == 500
+    # 回滚后：服务在**原数据**上重开，ready、计数完好、无 move-aside 残留、屏障已清。
+    assert state.ready is True
+    assert state.store is not None
+    assert state.store.count_entities() == 1
+    assert state.qdrant_main.count("chunks") == 1
+    leftovers = [p.name for p in data_dir.iterdir() if ".restore-old-" in p.name]
+    assert leftovers == []
+    assert state.backup_active is False
+
+    state.store.close()
+    state.qdrant_main.close()
+
+
+# ─── Barrier is mutually exclusive (P1 #61) ──────────────────────────────────
+
+
+def test_restore_rejected_when_barrier_already_held(monkeypatch) -> None:
+    """已有备份/恢复在进行时，restore 必须 409，且不 quiesce、不清别人的屏障。"""
+    state = kl_server.ServerState()
+    state.ready = True
+    state.backup_active = True
+    monkeypatch.setattr(kl_server, "state", state)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            kl_server.ingest_restore(kl_server.RestoreRequest(src_dir="/tmp/x"))
+        )
+    assert exc.value.status_code == 409
+    assert state.backup_active is True
+
+
 # ─── Guards ──────────────────────────────────────────────────────────────────
 
 
@@ -287,3 +363,75 @@ def test_restore_active_ingest_409(monkeypatch) -> None:
         loop.run_until_complete(task)
     loop.close()
     assert exc.value.status_code == 409
+
+
+# ─── Remote qdrant: vector dir NOT required (P2 #63) ─────────────────────────
+
+
+@skip_no_zvec
+def test_restore_remote_qdrant_does_not_require_vector_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """远端向量后端（snapshot_paths()==[]）时，缺向量目录不应导致 400。
+
+    构造：主向量库是一个 snapshot_paths() 返回 [] 的桩（模拟远端 qdrant）。src 只含
+    knowledge.db（无向量目录）。恢复应越过必需元素校验并成功重开。
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state = kl_server.ServerState()
+    state.ready = True
+    state.startup_time = 0
+    monkeypatch.setattr(kl_server, "state", state)
+    _force_sqlite_backend(monkeypatch)
+
+    class _RemoteVecStub:
+        """只暴露 restore 路径会用到的接口：snapshot_paths()==[]（无本地文件）。"""
+
+        def checkpoint(self):
+            pass
+
+        def snapshot_paths(self):
+            return []
+
+        def close(self):
+            pass
+
+    # 真 SQLite + 远端向量桩。
+    store = SQLiteStore(data_dir / "knowledge.db")
+    state.store = store
+    state.sqlite_conn = store.conn
+    state.qdrant_main = _RemoteVecStub()
+    state.qdrant_communities = None
+    _seed_entity(state, "FAKEENT0001", "张三")
+
+    # bootstrap 换成「重开 SQLite + 保留远端桩」。
+    def _fake_bootstrap() -> None:
+        s = SQLiteStore(data_dir / "knowledge.db")
+        kl_server.state.store = s
+        kl_server.state.sqlite_conn = s.conn
+        kl_server.state.qdrant_main = _RemoteVecStub()
+        kl_server.state.qdrant_communities = None
+
+    monkeypatch.setattr(kl_server, "_bootstrap_stores", _fake_bootstrap)
+
+    # 备份：远端后端只产出 knowledge.db（无向量目录）。
+    snap = tmp_path / "snap"
+    resp_b = asyncio.run(
+        kl_server.ingest_backup(kl_server.BackupRequest(dest_dir=str(snap)))
+    )
+    names = {c.name for c in resp_b.copied}
+    assert "knowledge.db" in names
+    assert "zvec_data" not in names  # 远端桩无本地向量目录
+
+    # 恢复：src 缺向量目录也**不应** 400——远端后端不要求它。
+    resp_r = asyncio.run(
+        kl_server.ingest_restore(kl_server.RestoreRequest(src_dir=str(snap)))
+    )
+    assert resp_r.restored is True
+    assert state.ready is True
+    assert state.store is not None
+    assert state.store.count_entities() == 1
+    assert state.backup_active is False
+
+    state.store.close()

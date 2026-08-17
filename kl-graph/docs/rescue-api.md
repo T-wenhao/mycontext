@@ -149,19 +149,24 @@ Response:
 - **The single-writer barrier.** The single-flight ingest/improve queue is the
   only writer to the graph and vector stores; SQLite backup is natively
   concurrency-safe. Backup therefore runs only when no ingest/improve task is in
-  flight, and blocks new ones while it runs (see status codes below). Each store
-  is `checkpoint()`-ed (flush-without-close: SQLite `wal_checkpoint(TRUNCATE)`,
-  ladybug bare `CHECKPOINT`, zvec per-collection `flush()`) before the copy so
-  the copied files are self-consistent.
+  flight, and blocks new ones while it runs (see status codes below). **Backup
+  and restore are mutually exclusive** — both hold the same `backup_active`
+  barrier, so two backups, two restores, or a backup racing a restore can never
+  overlap. Each store is `checkpoint()`-ed (flush-without-close: SQLite
+  `wal_checkpoint(TRUNCATE)`, ladybug bare `CHECKPOINT`, zvec per-collection
+  `flush()`) before the copy so the copied files are self-consistent.
 - **Copy mechanism.** Best-effort copy-on-write reflink (Linux `FICLONE`, macOS
   `clonefile`) with a `shutil.copy2`/`copytree` fallback; **all-or-nothing** — a
-  disk-headroom pre-check (need × 1.1) and any copy failure delete the whole
-  `dest_dir` and fail loudly (never a half-written snapshot; AGENTS.md §4).
+  disk-headroom pre-check (need × 1.1) and any copy failure fail loudly (never a
+  half-written snapshot; AGENTS.md §4). On failure only the artifacts this
+  request created are removed — a caller-provided `dest_dir` containing unrelated
+  files is preserved (the endpoint never `rmtree`s the whole directory).
 
 Status codes: `503` not ready · `409` an ingest/improve job is active (retry
-after it finishes) · `400` `dest_dir` is not absolute, or already contains
-snapshot files (kept self-contained/clean) · `500` insufficient headroom or a
-copy failure (with `dest_dir` removed).
+after it finishes), or another backup/restore is in progress · `400` `dest_dir`
+is not absolute, or already contains snapshot files (kept self-contained/clean) ·
+`500` insufficient headroom or a copy failure (only this request's artifacts are
+removed; the caller's other files in `dest_dir` are left intact).
 
 `dest_dir` is **never logged** (AGENTS.md §1).
 
@@ -196,7 +201,10 @@ Response:
   `ready=True`.
 - **Failure is recoverable.** If any copy fails, restore deletes the partial new
   files, renames the move-aside copies back, and **still** reopens the stores on
-  the original data before returning `500`. The server never wedges in
+  the original data before returning `500`. The move-aside copies are kept until
+  `_bootstrap_stores()` has reopened successfully — so even if the *reopen* fails
+  (a corrupt or incompatible snapshot), restore closes the partial handles, rolls
+  the originals back, and reopens on the original data. The server never wedges in
   `ready=False` on a half-swapped data directory.
 - **`extraction_cache.db` is left untouched** — even if `src_dir` contains one,
   it is ignored (structural exclusion, as in backup).
@@ -205,10 +213,12 @@ Response:
   reopens cleanly.
 
 Status codes: `503` not ready · `409` an ingest/improve job is active (stop it
-first) · `400` `src_dir` is not absolute, is not a directory, or is missing a
-required element (`knowledge.db`; `graph.ladybug` on the ladybug backend; the
-vector directory) — checked **before** quiesce so a bad request never closes
-handles · `500` copy failed (rolled back, stores reopened on original data).
+first), or a backup/restore is already in progress · `400` `src_dir` is not
+absolute, is not a directory, or is missing a required element (`knowledge.db`;
+`graph.ladybug` on the ladybug backend; the vector directory — required only when
+the active vector store keeps local files, i.e. not a remote qdrant) — checked
+**before** quiesce so a bad request never closes handles · `500` copy or reopen
+failed (rolled back, stores reopened on original data).
 
 `src_dir` is **never logged** (AGENTS.md §1).
 

@@ -243,3 +243,76 @@ def test_backup_insufficient_headroom_500_and_cleanup(
     if dest.exists():
         assert list(dest.iterdir()) == []
     assert state.backup_active is False
+
+
+# ─── Copy failure must not delete unrelated caller files (P1 #62) ────────────
+
+
+@skip_no_zvec
+def test_backup_copy_failure_preserves_unrelated_dest_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """dest_dir 里调用方的无关文件，在拷贝中途失败时**不得**被删。"""
+    state = _build_state(tmp_path / "data")
+    monkeypatch.setattr(kl_server, "state", state)
+
+    dest = tmp_path / "snap"
+    dest.mkdir()
+    # 调用方在 dest 里放了无关文件（与任何目标 basename 都不冲突）。
+    keeper = dest / "caller-notes.txt"
+    keeper.write_text("FAKE_CALLER_DATA_0001", encoding="utf-8")
+
+    # 让第一个元素之后的拷贝失败：copy_path 第二次调用抛错。
+    from kl_graph.storage import snapshot as _snap
+
+    calls = {"n": 0}
+
+    def _flaky_copy(src, dst):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("simulated mid-copy failure")
+        # 造出半成品目标，验证它被清、而 keeper 不被清。
+        Path(dst).write_bytes(b"FAKEPARTIAL0001")
+        return 15
+
+    monkeypatch.setattr(_snap, "copy_path", _flaky_copy)
+
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                kl_server.ingest_backup(kl_server.BackupRequest(dest_dir=str(dest)))
+            )
+    finally:
+        _close_state(state)
+
+    assert exc.value.status_code == 500
+    # 关键：调用方的无关文件必须原样保留，dest 目录本身也不能被 rmtree。
+    assert keeper.exists()
+    assert keeper.read_text(encoding="utf-8") == "FAKE_CALLER_DATA_0001"
+    assert state.backup_active is False
+
+
+# ─── Barrier is mutually exclusive (P1 #61) ──────────────────────────────────
+
+
+@skip_no_zvec
+def test_backup_rejected_when_barrier_already_held(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """已有备份/恢复在进行（backup_active=True）时，新备份必须 409 且不清屏障。"""
+    state = _build_state(tmp_path / "data")
+    state.backup_active = True  # 模拟另一个操作已持屏障
+    monkeypatch.setattr(kl_server, "state", state)
+
+    dest = tmp_path / "snap"
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                kl_server.ingest_backup(kl_server.BackupRequest(dest_dir=str(dest)))
+            )
+    finally:
+        _close_state(state)
+
+    assert exc.value.status_code == 409
+    # 被拒的请求绝不能清掉别人持有的屏障。
+    assert state.backup_active is True

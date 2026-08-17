@@ -1300,7 +1300,7 @@ async def ingest(req: IngestRequest):
     if not state.ready:
         raise HTTPException(503, "Server not ready")
     if state.backup_active:
-        raise HTTPException(409, "backup in progress; retry shortly")
+        raise HTTPException(409, "backup/restore in progress; retry shortly")
     input_dir = Path(req.input_dir).expanduser().resolve()
     if not input_dir.is_dir():
         raise HTTPException(400, f"input_dir is not a directory: {input_dir}")
@@ -1343,7 +1343,7 @@ async def improve(req: ImproveRequest):
     if not state.ready:
         raise HTTPException(503, "Server not ready")
     if state.backup_active:
-        raise HTTPException(409, "backup in progress; retry shortly")
+        raise HTTPException(409, "backup/restore in progress; retry shortly")
 
     run_id = str(uuid.uuid4())
     now = int(time.time())
@@ -1534,17 +1534,26 @@ def _do_backup(dest_dir: Path) -> dict:
 
     # 4. 逐元素拷贝，basename 保留使 dest_dir 自包含。
     copied: list[dict] = []
+    created: list[Path] = []  # 本次请求实际创建的目标，失败时只清这些
     total = 0
     try:
         for src in copy_set:
-            n = _snap.copy_path(src, dest_dir / src.name)
+            target = dest_dir / src.name
+            created.append(target)
+            n = _snap.copy_path(src, target)
             copied.append({"name": src.name, "bytes": n})
             total += n
     except BaseException:
-        # 任一元素失败 → 删整个 dest_dir，不留半成品。
+        # 任一元素失败 → 只删本次创建的目标，不碰 dest_dir 里调用方的其它文件。
+        # （端点允许 dest_dir 预先存在且非空，只要不与目标同名——所以绝不能 rmtree
+        # 整个目录，否则会误删调用方的无关数据，属于破坏性静默降级 AGENTS.md §4。）
         import shutil as _shutil
 
-        _shutil.rmtree(dest_dir, ignore_errors=True)
+        for target in created:
+            if target.is_dir():
+                _shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
         raise
 
     return {"copied": copied, "bytes": total, "skipped": list(_BACKUP_SKIPPED)}
@@ -1765,6 +1774,10 @@ async def ingest_backup(req: BackupRequest) -> BackupResponse:
     # 拒绝在飞写者：备份必须在安静点进行。
     if state.ingest_task is not None and not state.ingest_task.done():
         raise HTTPException(409, "ingest/improve job active; retry after it completes")
+    # 互斥屏障：另一个备份或恢复正在进行则拒绝。check-and-set 之间无 await，
+    # 单事件循环下天然原子；否则两个备份可并发、且一个的 finally 会过早清屏障。
+    if state.backup_active:
+        raise HTTPException(409, "backup/restore in progress; retry shortly")
 
     dest = Path(req.dest_dir)
     if not dest.is_absolute():
@@ -1819,6 +1832,9 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
         raise HTTPException(
             409, "ingest/improve job active; stop it before restoring"
         )
+    # 互斥屏障：恢复与备份、以及另一个恢复互斥（否则恢复会在备份读文件时换/关句柄）。
+    if state.backup_active:
+        raise HTTPException(409, "backup/restore in progress; retry shortly")
 
     src = Path(req.src_dir)
     if not src.is_absolute():
@@ -1830,7 +1846,10 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
     required = ["knowledge.db"]
     if cfg.storage.graph.backend == "ladybug":
         required.append("graph.ladybug")
-    required.append(VECTOR_PATH.name)
+    # 向量目录仅在本地后端有本地文件时才是必需的：远端 qdrant 的 snapshot_paths()
+    # 返回 []，备份根本不产出本地向量目录，此时不能强求它存在（否则恒 400）。
+    if state.qdrant_main is not None and state.qdrant_main.snapshot_paths():
+        required.append(VECTOR_PATH.name)
     missing = [name for name in required if not (src / name).exists()]
     if missing:
         raise HTTPException(400, f"src_dir missing required snapshot element(s): {missing}")
@@ -1838,12 +1857,40 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
     # 恢复目标集（DATA_DIR 下）须在关 store 前派生（snapshot_paths 读的是 store 实例）。
     dest_paths = _restore_dest_set()
 
+    # 置屏障（此处到 await 之间无其它 await，原子），finally 清除。
+    state.backup_active = True
+    try:
+        return await _do_restore(src, dest_paths)
+    finally:
+        state.backup_active = False
+
+
+async def _do_restore(src: Path, dest_paths: list[Path]) -> RestoreResponse:
+    """持屏障执行恢复：quiesce → move-aside → 拷入 → 进程内重开。
+
+    分离出来是为了让 ingest_restore 用 try/finally 干净地管理 backup_active 屏障。
+    """
     # 关闭所有句柄。
     await _quiesce()
     state.ready = False
 
     from kl_graph.storage import snapshot as _snap
     import shutil as _shutil
+
+    def _rollback_reopen(exc: Exception) -> None:
+        """回滚到原数据并重开：删本次拷入的新目标、把 move-aside 改回、再 bootstrap。"""
+        for dp in dest_paths:
+            if any(orig == dp for orig, _ in aside) and dp.exists():
+                if dp.is_dir():
+                    _shutil.rmtree(dp, ignore_errors=True)
+                else:
+                    dp.unlink(missing_ok=True)
+        for orig, moved in aside:
+            if moved.exists() and not orig.exists():
+                moved.rename(orig)
+        _bootstrap_stores()
+        state.startup_time = 0
+        state.ready = True
 
     # move-aside：把每个现有目标改名保留，便于失败回滚。
     ts = int(time.time())
@@ -1862,22 +1909,23 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
                 _snap.copy_path(sp, dp)
                 restored_items.append(dp.name)
     except Exception as e:  # noqa: BLE001
-        # 回滚：删半成品新文件，把 move-aside 改回，然后仍重开（在原数据上）。
-        for dp in dest_paths:
-            if any(orig == dp for orig, _ in aside) and dp.exists():
-                if dp.is_dir():
-                    _shutil.rmtree(dp, ignore_errors=True)
-                else:
-                    dp.unlink(missing_ok=True)
-        for orig, moved in aside:
-            if moved.exists() and not orig.exists():
-                moved.rename(orig)
-        _bootstrap_stores()
-        state.startup_time = 0
-        state.ready = True
+        _rollback_reopen(e)
         raise HTTPException(500, f"restore failed and rolled back: {e}") from e
 
-    # 成功：尽力清掉 move-aside 副本。
+    # 文件已换好，但**先别删 move-aside 副本**：重开可能因快照损坏/不兼容而失败，
+    # 那时还要靠 move-aside 把原数据换回来（否则原数据已删、服务卡在 not ready）。
+    try:
+        _bootstrap_stores()
+    except Exception as e:  # noqa: BLE001
+        # 重开失败 → 关掉可能半开的句柄，回滚到原数据后再重开。
+        await _quiesce()
+        _rollback_reopen(e)
+        raise HTTPException(500, f"restore reopen failed and rolled back: {e}") from e
+
+    state.startup_time = 0
+    state.ready = True
+
+    # 重开成功后才尽力清掉 move-aside 副本。
     for _orig, moved in aside:
         try:
             if moved.is_dir():
@@ -1886,11 +1934,6 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
                 moved.unlink(missing_ok=True)
         except OSError:
             pass
-
-    # 进程内重开。
-    _bootstrap_stores()
-    state.startup_time = 0
-    state.ready = True
 
     return RestoreResponse(
         restored=True,
