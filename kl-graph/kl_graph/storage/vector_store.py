@@ -93,6 +93,19 @@ class VectorStore(ABC):
     def close(self) -> None:
         """Flush and release backend resources."""
 
+    def checkpoint(self) -> None:
+        """Flush in-memory/index state to disk WITHOUT releasing handles.
+
+        Default is a no-op; local file backends override it. Must only be called
+        when no writer is active (guaranteed by the backup barrier).
+        """
+        return None
+
+    @abstractmethod
+    def snapshot_paths(self) -> list[Path]:
+        """Local file/dir set to copy as a unit; empty for remote-only backends."""
+        ...
+
     @staticmethod
     def stable_id_to_point_id(stable_id: str) -> str:
         """Map a stable domain ID to the backend's physical point ID."""

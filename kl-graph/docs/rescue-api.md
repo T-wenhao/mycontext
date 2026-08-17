@@ -9,20 +9,22 @@
 > two disagree, the code wins — re-verify and update this file.
 
 Grounded in `kl_server.py` (`/ingest/recovery-info`, `/ingest/stop`,
-`/status`), `kl_graph/ingest/recovery.py`
+`/ingest/backup`, `/ingest/restore`, `/status`), `kl_graph/ingest/recovery.py`
 (`classify_recovery`, `SkipRoundError`), `kl_graph/ingest/pipeline.py`
-(`_maybe_heal_missing_workset`, `_load_workset`), and
-`kl_graph/ingest/runner.py` (`run_ingestion` skip branch). Verified end-to-end
-on a real-data rig (Case B → skip → accumulate).
+(`_maybe_heal_missing_workset`, `_load_workset`),
+`kl_graph/ingest/runner.py` (`run_ingestion` skip branch), and
+`kl_graph/storage/snapshot.py` (`copy_path`) plus each store's
+`checkpoint()` / `snapshot_paths()`. Verified end-to-end on a real-data rig
+(Case B → skip → accumulate).
 
 ---
 
 ## API
 
 All rescue endpoints are **localhost-only** and intended for the desktop
-wrapper. `store_paths` (the store files the wrapper copies/restores as a unit)
-are returned only over localhost and never logged (AGENTS.md §1). All return
-`503` when the server is not ready.
+wrapper. Server-local paths — `store_paths` (returned by recovery-info/stop) and
+the `dest_dir`/`src_dir` of backup/restore — are handled only over localhost and
+**never logged** (AGENTS.md §1). All return `503` when the server is not ready.
 
 ### `GET /ingest/recovery-info` (read-only)
 
@@ -100,32 +102,126 @@ Note that stop is rarely needed for *recovery*: the A/B/C/D cases below
 the wrapper take control of the store files — quiesce, copy or restore, then
 resume — or to halt a wedged/hung job.
 
-### How the wrapper backs up and restores
+### `POST /ingest/backup` (crash-consistent snapshot)
 
-kl exposes **no** `/backup`, `/snapshot`, or `/restore` endpoint, and does no
-file copying, `VACUUM INTO`, or graph-backend `CHECKPOINT`-for-backup itself.
-This is deliberate (`ingestion-recovery-design.md` §3.2): kl owns only the
-**round identity** (`ingestion_id` + `round_started_at`, minted together at round
-start) and a **graceful quiesce**; the **wrapper owns the entire backup/restore
-policy** — whether to copy, the copy mechanism, where it lives, retention, and
-the actual restore.
+Copies the live stores into a caller-provided server-local directory, producing
+a **self-contained, crash-consistent** snapshot. The caller (wrapper) owns
+retention, location, and naming; kl owns only the copy mechanics and the
+single-writer barrier that makes the copy consistent.
 
-kl's implemented contribution to that flow is exactly two things:
+Request:
 
-1. **`GET /ingest/recovery-info` → `store_paths`** tells the wrapper *what to
-   back up* — the store files that must be copied/restored as a unit, keyed to
-   the round's `ingestion_id`.
-2. **`POST /ingest/stop`** quiesces so the wrapper copies/restores files that are
-   not mid-write.
+```json
+{ "dest_dir": "/abs/server-local/path/snap-<ingestion_id>" }
+```
 
-> **Status:** the wrapper-side backup/restore itself is **not yet implemented**.
-> So wherever this doc or a skip-round warning says "restore a snapshot", it
-> describes the *intended* wrapper action (restore its own pre-round copy filed
-> under `ingestion_id`) — a capability that does not exist on either side today.
-> Until the wrapper builds it, a skipped round's facts are simply lost (the
-> round's units stay marked seen); the graph is preserved but that round is not
-> recoverable. This is stated so the advice is not read as a working feature it
-> is not (AGENTS.md §4).
+Response:
+
+```json
+{
+  "ingestion_id": "<batch_id or empty>",
+  "round_started_at": 1786635320,
+  "dest_dir": "/abs/server-local/path/snap-<ingestion_id>",
+  "copied": [
+    {"name": "knowledge.db", "bytes": 1234567},
+    {"name": "graph.ladybug", "bytes": 890123},
+    {"name": "zvec_data", "bytes": 4567890}
+  ],
+  "skipped": ["extraction_cache.db"],
+  "bytes": 6692580
+}
+```
+
+- **What is copied** is each store's `snapshot_paths()` — `knowledge.db` (+ its
+  `-wal`/`-shm` sidecars if present), the graph backend file (+ `.wal` on
+  ladybug), and the vector directory (main + community). Sidecars already
+  truncated by the pre-copy `checkpoint()` are simply absent from `copied`.
+- **`extraction_cache.db` is excluded structurally, not by a filter.** No store
+  returns it from `snapshot_paths()`, so neither backup nor restore ever touches
+  it. It is a content-addressed extraction accelerator (`cache_key` derives from
+  `chunk_id` + a model/prompt/strategy/schema fingerprint), rebuildable and safe
+  to leave in place. The `skipped` field is documentation only.
+- **Crash-consistent, not transactional.** The four stores are not cross-engine
+  transactional, so the snapshot may be logically split mid-round. That is
+  sufficient: a restored snapshot is treated exactly like a post-crash state and
+  handled by the A/B/C/D classifier + `SkipRoundError` (see **Behavior**) — a
+  split round skips, the graph is preserved. No 2PC.
+- **The single-writer barrier.** The single-flight ingest/improve queue is the
+  only writer to the graph and vector stores; SQLite backup is natively
+  concurrency-safe. Backup therefore runs only when no ingest/improve task is in
+  flight, and blocks new ones while it runs (see status codes below). Each store
+  is `checkpoint()`-ed (flush-without-close: SQLite `wal_checkpoint(TRUNCATE)`,
+  ladybug bare `CHECKPOINT`, zvec per-collection `flush()`) before the copy so
+  the copied files are self-consistent.
+- **Copy mechanism.** Best-effort copy-on-write reflink (Linux `FICLONE`, macOS
+  `clonefile`) with a `shutil.copy2`/`copytree` fallback; **all-or-nothing** — a
+  disk-headroom pre-check (need × 1.1) and any copy failure delete the whole
+  `dest_dir` and fail loudly (never a half-written snapshot; AGENTS.md §4).
+
+Status codes: `503` not ready · `409` an ingest/improve job is active (retry
+after it finishes) · `400` `dest_dir` is not absolute, or already contains
+snapshot files (kept self-contained/clean) · `500` insufficient headroom or a
+copy failure (with `dest_dir` removed).
+
+`dest_dir` is **never logged** (AGENTS.md §1).
+
+### `POST /ingest/restore` (quiesce → swap → in-process reopen)
+
+Restores a prior snapshot in place and reopens the stores **without restarting
+the process**. All stores are plain on-disk files that each engine opens at
+startup, so restore is: close handles → swap files → reopen.
+
+Request:
+
+```json
+{ "src_dir": "/abs/server-local/path/snap-<ingestion_id>" }
+```
+
+Response:
+
+```json
+{
+  "restored": true,
+  "src_dir": "/abs/server-local/path/snap-<ingestion_id>",
+  "reopened": true,
+  "restored_items": ["knowledge.db", "graph.ladybug", "zvec_data"],
+  "skipped": ["extraction_cache.db"]
+}
+```
+
+- **Sequence:** validate → `_quiesce()` (cancel any task, close all handles) →
+  **move-aside** each existing target to `<name>.restore-old-<ts>` → copy the
+  snapshot elements in → reopen via the shared `_bootstrap_stores()` (the same
+  build path lifespan uses, so restore and cold start can never drift) →
+  `ready=True`.
+- **Failure is recoverable.** If any copy fails, restore deletes the partial new
+  files, renames the move-aside copies back, and **still** reopens the stores on
+  the original data before returning `500`. The server never wedges in
+  `ready=False` on a half-swapped data directory.
+- **`extraction_cache.db` is left untouched** — even if `src_dir` contains one,
+  it is ignored (structural exclusion, as in backup).
+- **Ladybug WAL note.** The snapshot is copied *after* `checkpoint()` drained the
+  `.wal`, so the restored `(graph.ladybug, .wal)` pair is self-consistent and
+  reopens cleanly.
+
+Status codes: `503` not ready · `409` an ingest/improve job is active (stop it
+first) · `400` `src_dir` is not absolute, is not a directory, or is missing a
+required element (`knowledge.db`; `graph.ladybug` on the ladybug backend; the
+vector directory) — checked **before** quiesce so a bad request never closes
+handles · `500` copy failed (rolled back, stores reopened on original data).
+
+`src_dir` is **never logged** (AGENTS.md §1).
+
+### Who owns what
+
+kl owns the **round identity** (`ingestion_id` + `round_started_at`, minted
+together at round start), a **graceful quiesce** (`/ingest/stop`), and now the
+**crash-consistent copy/restore mechanics** (`/ingest/backup`,
+`/ingest/restore`, keyed by the caller's `dest_dir`/`src_dir`). The **wrapper
+still owns policy** — whether and when to snapshot, where snapshots live,
+retention, and naming (conventionally filed under `ingestion_id`). `store_paths`
+from `/ingest/recovery-info` and `/ingest/stop` remains available for a wrapper
+that prefers to copy files itself while kl is quiesced.
 
 ### Observing outcomes: `GET /status` and `GET /ingest/{run_id}/failures`
 
@@ -244,9 +340,10 @@ silently swallowing the loss.
 A skipped round's units stay marked **seen** in the dedup ledger (they were
 committed atomically in Phase A, before Phase B). So their facts are **not**
 re-derived automatically on the next round. Recovering that round's data
-requires a **snapshot restore** — the wrapper's pre-round backup keyed on
-`ingestion_id` (design §3/§4.3). kl performs no lossy logical deletion and holds
-no copy of its own.
+requires a **snapshot restore** — the wrapper restores a pre-round snapshot
+(taken via `POST /ingest/backup`, filed under `ingestion_id`) with
+`POST /ingest/restore`. kl performs no lossy logical deletion and holds no copy
+of its own beyond what the wrapper explicitly snapshots.
 
 #### Why there is no "partially seen" case
 
@@ -291,10 +388,10 @@ same `source_id`** (see *What "next round" means*). Nothing here needs
 |----------|---------|---------|-----|
 | **Process crashed mid-ingest** (OOM / kill -9 / power loss) | `/status` may still read `running` from before the crash; server restarted | Just **run ingest again** (same `source_id`). No stop needed. | Checkpoint + workset are durable; a matching `source_hash` resumes from the first unfinished step. Extraction cache avoids re-billing already-extracted chunks. |
 | **Job wedged / hung** (no progress, want the process to let go of files) | `state='running'`, no advancement | **`POST /ingest/stop`**, then run ingest again. | Stop cancels the task (≤30 s) and releases DB/vector handles. It's reversible — the round identity and workset are untouched; the re-issued ingest resumes normally. |
-| **`recovery_tier: "resume"`** before re-ingesting | recovery-info reports `resume` | **Run ingest** (same `source_id`). Optionally have the wrapper snapshot first. | Case A / Case B-with-source rebuild the workset (Phase A is idempotent) and continue. Expected outcome `success`. *Caveat:* a `resume` can still turn into a skip if the source's units are all already seen (Case B′) — the wrapper snapshot is cheap insurance. |
-| **`recovery_tier: "cleanup"`** before re-ingesting | recovery-info reports `cleanup` (Cases C / D / B-source-gone) | If that round's data matters, **restore the wrapper's pre-round snapshot** for this `ingestion_id` first *(not yet implemented — see Status note above)*; then **run ingest**. | The broken round **cannot** be rebuilt; the next ingest will auto-**skip** it (`state='done'`, `outcome='skipped'`, warning), `checkpoint.reset()`, and keep accumulating. The skipped round's facts are lost unless restored from a snapshot. |
+| **`recovery_tier: "resume"`** before re-ingesting | recovery-info reports `resume` | **Run ingest** (same `source_id`). Optionally snapshot first with **`POST /ingest/backup`**. | Case A / Case B-with-source rebuild the workset (Phase A is idempotent) and continue. Expected outcome `success`. *Caveat:* a `resume` can still turn into a skip if the source's units are all already seen (Case B′) — the pre-round snapshot is cheap insurance. |
+| **`recovery_tier: "cleanup"`** before re-ingesting | recovery-info reports `cleanup` (Cases C / D / B-source-gone) | If that round's data matters, **restore a pre-round snapshot** for this `ingestion_id` via **`POST /ingest/restore`** first; then **run ingest**. | The broken round **cannot** be rebuilt; the next ingest will auto-**skip** it (`state='done'`, `outcome='skipped'`, warning), `checkpoint.reset()`, and keep accumulating. The skipped round's facts are lost unless restored from a snapshot. |
 | **`recovery_tier: "ok"`** | no anomaly | **Run ingest** normally. | Fresh load or healthy resume; nothing to rescue. |
-| **You want a pre-round backup** | before any risky round | **`GET /ingest/recovery-info`** → copy the `store_paths` as a unit, keyed to `ingestion_id`; quiesce with **`POST /ingest/stop`** first so files aren't mid-write. | kl owns identity + quiesce only; the wrapper owns the copy. *(Wrapper backup/restore is not yet implemented — Status note above.)* |
+| **You want a pre-round backup** | before any risky round | **`POST /ingest/backup`** with a `dest_dir` keyed to `ingestion_id`. (No separate stop needed — backup self-quiesces via the single-writer barrier.) | Crash-consistent copy of all stores except the rebuildable `extraction_cache.db`. Restore later with `POST /ingest/restore`. |
 | **Round reported `outcome: "skipped"`** | `/status` shows `skipped` + warning | Read the `warning`; restore a snapshot only if that round's data is needed. Otherwise **nothing to do** — the next round already accumulates cleanly. | Skip is the designed safe outcome, not an error. The graph was preserved. |
 | **Round reported `outcome: "partial"`** | `extraction_failed > 0`, `failures_url` set | Fetch `GET /ingest/{run_id}/failures`; re-run ingest to retry failed items. | Partial = per-item extraction failures (distinct from a skipped round). Cache keeps successful items from re-billing. |
 | **Confidential / no-permission conversation** | server-side source refused | **Leave it out of scope; do not retry with different creds/params.** Record as unreadable, not `0`. | Access refusal is a boundary, not a recoverable failure (AGENTS.md §5). |

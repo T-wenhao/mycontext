@@ -517,5 +517,18 @@ class ZvecVectorStore(VectorStore):
         self._collections.clear()
         gc.collect()
 
+    def checkpoint(self) -> None:
+        """把各 collection 的内存/索引状态 flush 到磁盘，不释放句柄。
+
+        镜像 close() 的 flush 部分，但**不** clear/gc —— 备份时要保持 handle 打开。
+        flush 是 zvec 唯一的持久化原语；备份屏障保证无并发写者。
+        """
+        for collection in self._collections.values():
+            collection.flush()
+
+    def snapshot_paths(self) -> list[Path]:
+        """整个 data_dir：各 collection 子目录 + point_ids.sqlite3 清单，一次拷全。"""
+        return [self.data_dir]
+
 
 __all__ = ["ZvecVectorStore"]

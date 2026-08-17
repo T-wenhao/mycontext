@@ -10,6 +10,7 @@ A spatio-temporal knowledge graph for workplace communication and documents.
 2. **Allow conflicts.** The graph tolerates contradictory facts. Resolution is a query-time concern, not an ingestion-time one. Contradictions are explicitly marked, not silently merged.
 3. **Improvement on the fly.** The graph grows richer over time. Periodic and query-time processes add edges, refine communities, and disambiguate entities without re-ingesting raw data.
 4. **Units for ingestion; chunks for retrieval.** A source unit is the smallest caller-owned identity used for deduplication (for example a message or document). The framework maps units into retrieval chunks: many messages may share a chunk, and one large unit may span several chunks. There is no separate "message" graph node; chat content is represented by chunks with `source_type=message`.
+5. **Ingestion is idempotent under fixed configuration.** Re-running ingestion with the same configuration (same source scope, chunking, and extraction identity) produces no duplicates: committed composite unit ids are skipped via the dedup ledger, so a re-run over an unchanged source is a no-op and a partial/interrupted run is safely resumed by re-ingesting. There is no watermark — a late unit with an old timestamp but an unseen id is still processed. This is what makes crash recovery and snapshot restore safe: replaying a round cannot corrupt the graph. (See "No watermark" and "Re-runnability" below.)
 
 ---
 

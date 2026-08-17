@@ -1096,3 +1096,12 @@ class LadybugGraphDB(GraphDB):
             self._conn.close()
         if hasattr(self, "_db") and self._db and not self._db.is_closed:
             self._db.close()
+
+    def checkpoint(self) -> None:
+        """把 Ladybug WAL 抽干到主库，不关闭连接。
+
+        没有 Python API，只能发裸 Cypher 语句 CHECKPOINT。备份屏障保证无并发写者，
+        执行后 graph.ladybug 与其 .wal 自洽，可作为快照整体拷贝。
+        """
+        self._conn.execute("CHECKPOINT")
+

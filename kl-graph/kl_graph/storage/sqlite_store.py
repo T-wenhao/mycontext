@@ -570,6 +570,24 @@ class SQLiteStore(KnowledgeStore):
         self._connections.clear()
         self._local = threading.local()
 
+    def checkpoint(self) -> None:
+        """把 WAL 抽干并截断到主库文件，不关闭连接。
+
+        用调用线程自己的连接执行（每线程独立 handle）；备份屏障保证此刻无并发写者，
+        因此 TRUNCATE 可以安全地把 -wal 清零。执行后 snapshot_paths() 可作为崩溃一致
+        的整体拷贝。:memory:/无路径库无 WAL 文件可抽，PRAGMA 亦无害。
+        """
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def snapshot_paths(self) -> list[FsPath]:
+        """主库文件 + WAL/SHM 边车。checkpoint 后边车可能不存在，由调用方过滤。"""
+        base = FsPath(self.db_path)
+        return [
+            base,
+            base.with_name(base.name + "-wal"),
+            base.with_name(base.name + "-shm"),
+        ]
+
     # ─── Ingest metadata (key-value store for watermarks/run counts) ──────
 
     def get_meta(self, key: str) -> str | None:

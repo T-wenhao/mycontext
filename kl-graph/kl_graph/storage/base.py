@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, Self
 
 from kl_graph.models.types import (
@@ -43,6 +44,25 @@ class KnowledgeStore(ABC):
     def close(self) -> None:
         """Release all resources (connections, file handles)."""
         raise NotImplementedError
+
+    def checkpoint(self) -> None:
+        """Flush pending writes (WAL, buffers) to the main on-disk files WITHOUT
+        closing the store. After this returns, ``snapshot_paths()`` are safe to
+        copy as a crash-consistent unit.
+
+        Default is a no-op; backends with a WAL or in-memory buffer override it.
+        Must only be called when no writer is active (the server's single-flight
+        ingest queue is the sole writer, so the backup barrier guarantees this).
+        """
+        return None
+
+    @abstractmethod
+    def snapshot_paths(self) -> list[Path]:
+        """Ordered candidate file-set that must be copied together to snapshot
+        this store. May include sidecars (e.g. ``-wal``/``-shm``) that do not
+        exist after a checkpoint; the caller filters non-existent entries.
+        """
+        ...
 
     def __enter__(self) -> Self:
         """Enter context manager, returning self."""

@@ -109,6 +109,7 @@ class QdrantVectorStore(VectorStore):
         if path is None and data_dir is None:
             raise ValueError("QdrantVectorStore requires path or data_dir")
         self.path = str(path if path is not None else data_dir)
+        self._host = str(host or "")
         self._store = QdrantStore(
             path=self.path,
             host=host,
@@ -241,6 +242,12 @@ class QdrantVectorStore(VectorStore):
 
     def close(self) -> None:
         self._store.close()
+
+    def snapshot_paths(self) -> list[Path]:
+        """本地嵌入模式返回本地库路径；远端模式（配置了 host）无本地文件，返回 []。"""
+        if self._host:
+            return []
+        return [Path(self.path)]
 
 
 __all__ = ["QdrantVectorStore"]

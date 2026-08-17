@@ -138,6 +138,10 @@ class ServerState:
     ingest_task: object | None = None  # asyncio.Task
     ingest_progress: dict | None = None  # {state, phase, percent, detail, error}
     current_run_id: str | None = None
+    # 备份进行中标志。备份要冻结所有后端：置 True 期间 /ingest 与 /improve 一律拒绝
+    # （409），保证拷贝时无写者进入。与 ingest_task 检查一起构成「单写者屏障」。
+    # 在事件循环上同步置位/清除（await 线程前置 True、finally 清除），无竞态。
+    backup_active: bool = False
     # Request-admission gate for the retrieval endpoints. A single
     # asyncio.Semaphore(QUERY_MAX_CONCURRENCY) so at most that many queries run
     # concurrently; the rest queue-and-wait. Created lazily on the running loop
@@ -755,12 +759,14 @@ async def _run_ingest_queue(first: tuple[str, object]) -> None:
         state.ingest_task = None
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Pre-warm all stores on startup."""
-    t_start = time.time()
-    logger.info("=== kl-server starting ===")
+def _bootstrap_stores() -> None:
+    """打开并预热所有存储句柄（SQLite 连接 + KnowledgeStore + StructuralCache +
+    adjacency + pagerank + 主/社区向量库 + QueryEngine），设置 state 上的对应字段。
 
+    lifespan 启动与 /ingest/restore 恢复后都调用它 —— 单一建栈路径，避免两处漂移。
+    **不**碰 state.ready/startup_time（就绪转换归调用方），**不**重建 loop 绑定的
+    query_sema（懒建、按 loop 绑定）。前提：调用前任何旧句柄已关闭（quiesce 后）。
+    """
     # 1. SQLite (fast)
     logger.info(f"Opening SQLite: {SQLITE_PATH}")
     Path(SQLITE_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -779,6 +785,8 @@ async def lifespan(app: FastAPI):
     from kl_graph.storage.sqlite_store import SQLiteStore
 
     SQLiteStore(Path(SQLITE_PATH), conn=state.sqlite_conn)
+    # 启动/恢复重开时，把残留的 queued/running 轮次落成 error：quiesce 后不存在在飞轮次，
+    # 这条清理在两条路径上都正确且无害。
     state.sqlite_conn.execute(
         """UPDATE ingest_runs
            SET state='error', error='server restarted before completion',
@@ -880,6 +888,15 @@ async def lifespan(app: FastAPI):
         logger.error(f"Query engine init failed (search will be degraded): {e}")
         state.engine = None
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pre-warm all stores on startup."""
+    t_start = time.time()
+    logger.info("=== kl-server starting ===")
+
+    _bootstrap_stores()
+
     state.startup_time = time.time() - t_start
     state.ready = True
     logger.info(f"=== kl-server ready in {state.startup_time:.1f}s (port {PORT}) ===")
@@ -932,6 +949,47 @@ class ImproveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["full"] = "full"
+
+
+class BackupRequest(BaseModel):
+    """一致性快照备份请求。dest_dir 是服务端本地绝对路径，由调用方（wrapper）提供，
+    保留/位置/命名归调用方所有。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dest_dir: str = Field(min_length=1)
+
+
+class CopiedItem(BaseModel):
+    """备份清单里的一项：basename + 字节数。"""
+
+    name: str
+    bytes: int
+
+
+class BackupResponse(BaseModel):
+    ingestion_id: str
+    round_started_at: int
+    dest_dir: str
+    copied: list[CopiedItem]
+    skipped: list[str]
+    bytes: int
+
+
+class RestoreRequest(BaseModel):
+    """从快照恢复请求。src_dir 是服务端本地绝对路径，指向一次 /ingest/backup 的产物。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    src_dir: str = Field(min_length=1)
+
+
+class RestoreResponse(BaseModel):
+    restored: bool
+    src_dir: str
+    reopened: bool
+    restored_items: list[str]
+    skipped: list[str]
 
 
 class AskQueryIntent(BaseModel):
@@ -1241,6 +1299,8 @@ async def ingest(req: IngestRequest):
     """Scan a server-local directory and incrementally ingest unseen units."""
     if not state.ready:
         raise HTTPException(503, "Server not ready")
+    if state.backup_active:
+        raise HTTPException(409, "backup in progress; retry shortly")
     input_dir = Path(req.input_dir).expanduser().resolve()
     if not input_dir.is_dir():
         raise HTTPException(400, f"input_dir is not a directory: {input_dir}")
@@ -1282,6 +1342,8 @@ async def improve(req: ImproveRequest):
 
     if not state.ready:
         raise HTTPException(503, "Server not ready")
+    if state.backup_active:
+        raise HTTPException(409, "backup in progress; retry shortly")
 
     run_id = str(uuid.uuid4())
     now = int(time.time())
@@ -1389,6 +1451,103 @@ def _store_paths() -> list[str]:
         str(DATA_DIR / "extraction_cache.db"),
     ]
     return paths
+
+
+def _snapshot_specs() -> list[object]:
+    """备份/恢复要一起拷贝的存储对象：知识库 + 主/社区向量库。
+
+    拷贝集由各对象的 snapshot_paths() 决定。extraction_cache.db 不属于任何 store，
+    因此**结构性地**被排除（不是靠过滤）——两侧都拿不到它，恢复也不会碰它。
+    """
+    specs: list[object] = []
+    if state.store is not None:
+        specs.append(state.store)
+    if state.qdrant_main is not None:
+        specs.append(state.qdrant_main)
+    if state.qdrant_communities is not None:
+        specs.append(state.qdrant_communities)
+    return specs
+
+
+def _backup_copy_set() -> list[Path]:
+    """展开所有 store 的 snapshot_paths()，过滤掉不存在项（如 checkpoint 后已截断的
+    -wal/-shm）。返回实际要拷贝的绝对路径列表。"""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for spec in _snapshot_specs():
+        for p in spec.snapshot_paths():
+            ap = Path(p)
+            key = str(ap)
+            if key in seen or not ap.exists():
+                continue
+            seen.add(key)
+            out.append(ap)
+    return out
+
+
+def _restore_dest_set() -> list[Path]:
+    """恢复时的目标路径全集（DATA_DIR 下），由 store 的 snapshot_paths() 派生。
+
+    与 _backup_copy_set 不同，这里**不**按是否存在过滤——恢复要能覆盖/移开所有候选
+    目标（含当前尚不存在的边车）。须在 quiesce（关闭 store）**之前**调用。
+    """
+    out: list[Path] = []
+    seen: set[str] = set()
+    for spec in _snapshot_specs():
+        for p in spec.snapshot_paths():
+            ap = Path(p)
+            key = str(ap)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(ap)
+    return out
+
+
+# 排除拷贝集的派生缓存名（仅用于文档化响应的 skipped 字段；排除本身是结构性的）。
+_BACKUP_SKIPPED = ["extraction_cache.db"]
+
+
+def _do_backup(dest_dir: Path) -> dict:
+    """在 worker 线程内执行：checkpoint 所有 store → 余量预检 → 逐元素拷贝 → 返回清单。
+
+    调用前提：备份屏障已持有（state.backup_active=True 且无在飞写者），因此
+    checkpoint 与拷贝期间没有并发写者。任一步失败都会删掉整个 dest_dir 再抛出
+    （绝不留半成品，AGENTS.md §4）。
+    """
+    from kl_graph.storage import snapshot as _snap
+
+    # 1. flush 各 store 的 WAL/缓冲到主文件（不关句柄）。
+    for spec in _snapshot_specs():
+        spec.checkpoint()
+
+    # 2. 枚举实际拷贝集（checkpoint 后再取，边车可能已消失）。
+    copy_set = _backup_copy_set()
+
+    # 3. 磁盘余量预检：需求 * 1.1 安全系数。不足则大声失败。
+    needed = sum(_snap.dir_size(p) for p in copy_set)
+    free = _snap.free_bytes(dest_dir)
+    if free < int(needed * 1.1):
+        raise RuntimeError(
+            f"insufficient disk headroom: need ~{needed} bytes (x1.1), free {free}"
+        )
+
+    # 4. 逐元素拷贝，basename 保留使 dest_dir 自包含。
+    copied: list[dict] = []
+    total = 0
+    try:
+        for src in copy_set:
+            n = _snap.copy_path(src, dest_dir / src.name)
+            copied.append({"name": src.name, "bytes": n})
+            total += n
+    except BaseException:
+        # 任一元素失败 → 删整个 dest_dir，不留半成品。
+        import shutil as _shutil
+
+        _shutil.rmtree(dest_dir, ignore_errors=True)
+        raise
+
+    return {"copied": copied, "bytes": total, "skipped": list(_BACKUP_SKIPPED)}
 
 
 def _last_batch_source_id(conn) -> str:
@@ -1586,6 +1745,160 @@ async def ingest_stop():
     result["round_started_at"] = round_started_at
     result["store_paths"] = _store_paths()
     return result
+
+
+@app.post("/ingest/backup")
+async def ingest_backup(req: BackupRequest) -> BackupResponse:
+    """把当前存储做一次崩溃一致（crash-consistent）的自包含快照拷贝到 dest_dir。
+
+    dest_dir 是调用方提供的服务端本地绝对路径；保留/位置/命名归调用方所有。
+    拷贝集 = 知识库 + 主/社区向量库的 snapshot_paths()，**结构性排除**
+    extraction_cache.db（内容寻址、可重建，不必进快照）。
+
+    屏障：仅当无在飞摄取/改进任务时可跑（否则 409）；跑期间置 backup_active=True，
+    /ingest 与 /improve 一律 409，保证拷贝时无写者进入。CPU/IO 走 worker 线程。
+
+    localhost-only；dest_dir 绝不写日志（AGENTS.md §1）。
+    """
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+    # 拒绝在飞写者：备份必须在安静点进行。
+    if state.ingest_task is not None and not state.ingest_task.done():
+        raise HTTPException(409, "ingest/improve job active; retry after it completes")
+
+    dest = Path(req.dest_dir)
+    if not dest.is_absolute():
+        raise HTTPException(400, "dest_dir must be an absolute path")
+
+    ingestion_id, round_started_at = _current_ingestion_identity()
+
+    dest.mkdir(parents=True, exist_ok=True)
+    # 保持自包含目标干净：若已含目标 basename，拒绝（避免与旧快照混在一起）。
+    existing = {p.name for p in dest.iterdir()}
+    target_names = {p.name for p in _backup_copy_set()}
+    if existing & target_names:
+        raise HTTPException(400, "dest_dir already contains snapshot files")
+
+    # 在事件循环上同步置位屏障（await 前，杜绝竞态），worker 线程做重活，finally 清除。
+    state.backup_active = True
+    try:
+        manifest = await asyncio.to_thread(_do_backup, dest)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"backup failed: {e}") from e
+    finally:
+        state.backup_active = False
+
+    return BackupResponse(
+        ingestion_id=ingestion_id,
+        round_started_at=round_started_at,
+        dest_dir=str(dest),
+        copied=[CopiedItem(**c) for c in manifest["copied"]],
+        skipped=manifest["skipped"],
+        bytes=manifest["bytes"],
+    )
+
+
+@app.post("/ingest/restore")
+async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
+    """从 src_dir 的快照恢复：quiesce → 换文件 → 进程内重开。
+
+    所有存储都是本机文件，各引擎在启动时打开磁盘上的内容，因此恢复 = 关句柄 + 换文件
+    + 重开（后端相关性只在备份侧的 checkpoint）。**不动** extraction_cache.db（即便
+    src_dir 里有也忽略）。
+
+    安全：先关旧句柄再换文件；用 move-aside（把现有目标改名 .restore-old-<ts>）+ 失败
+    回滚保证「半换态」可恢复；无论成败最后都重开，服务不会卡在 ready=False。
+
+    localhost-only；src_dir 绝不写日志（AGENTS.md §1）。
+    """
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+    if state.ingest_task is not None and not state.ingest_task.done():
+        raise HTTPException(
+            409, "ingest/improve job active; stop it before restoring"
+        )
+
+    src = Path(req.src_dir)
+    if not src.is_absolute():
+        raise HTTPException(400, "src_dir must be an absolute path")
+    if not src.is_dir():
+        raise HTTPException(400, "src_dir is not a directory")
+
+    # 必需元素校验（在 quiesce 之前，避免关了句柄才发现快照不完整）。
+    required = ["knowledge.db"]
+    if cfg.storage.graph.backend == "ladybug":
+        required.append("graph.ladybug")
+    required.append(VECTOR_PATH.name)
+    missing = [name for name in required if not (src / name).exists()]
+    if missing:
+        raise HTTPException(400, f"src_dir missing required snapshot element(s): {missing}")
+
+    # 恢复目标集（DATA_DIR 下）须在关 store 前派生（snapshot_paths 读的是 store 实例）。
+    dest_paths = _restore_dest_set()
+
+    # 关闭所有句柄。
+    await _quiesce()
+    state.ready = False
+
+    from kl_graph.storage import snapshot as _snap
+    import shutil as _shutil
+
+    # move-aside：把每个现有目标改名保留，便于失败回滚。
+    ts = int(time.time())
+    aside: list[tuple[Path, Path]] = []  # (original, moved)
+    restored_items: list[str] = []
+    try:
+        for dp in dest_paths:
+            if dp.exists():
+                moved = dp.with_name(f"{dp.name}.restore-old-{ts}")
+                dp.rename(moved)
+                aside.append((dp, moved))
+        # 从 src_dir 拷入（仅拷 src 中存在的元素）。
+        for dp in dest_paths:
+            sp = src / dp.name
+            if sp.exists():
+                _snap.copy_path(sp, dp)
+                restored_items.append(dp.name)
+    except Exception as e:  # noqa: BLE001
+        # 回滚：删半成品新文件，把 move-aside 改回，然后仍重开（在原数据上）。
+        for dp in dest_paths:
+            if any(orig == dp for orig, _ in aside) and dp.exists():
+                if dp.is_dir():
+                    _shutil.rmtree(dp, ignore_errors=True)
+                else:
+                    dp.unlink(missing_ok=True)
+        for orig, moved in aside:
+            if moved.exists() and not orig.exists():
+                moved.rename(orig)
+        _bootstrap_stores()
+        state.startup_time = 0
+        state.ready = True
+        raise HTTPException(500, f"restore failed and rolled back: {e}") from e
+
+    # 成功：尽力清掉 move-aside 副本。
+    for _orig, moved in aside:
+        try:
+            if moved.is_dir():
+                _shutil.rmtree(moved, ignore_errors=True)
+            else:
+                moved.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # 进程内重开。
+    _bootstrap_stores()
+    state.startup_time = 0
+    state.ready = True
+
+    return RestoreResponse(
+        restored=True,
+        src_dir=str(src),
+        reopened=state.ready and state.store is not None,
+        restored_items=restored_items,
+        skipped=list(_BACKUP_SKIPPED),
+    )
 
 
 @app.post("/search")

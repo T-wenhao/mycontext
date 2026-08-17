@@ -111,6 +111,22 @@ class LadybugStore(KnowledgeStore):
         self._graph.close()
         self._sqlite.close()
 
+    def checkpoint(self) -> None:
+        """抽干两侧 WAL：SQLite（TRUNCATE）+ Ladybug（CHECKPOINT Cypher）。
+
+        备份屏障保证无并发写者。checkpoint 后主库与图库都自洽，可整体拷贝。
+        """
+        self._sqlite.checkpoint()
+        self._graph.checkpoint()
+
+    def snapshot_paths(self) -> list[Path]:
+        """SQLite 文件集 + Ladybug 主库及其 .wal 边车。"""
+        graph_path = Path(self._graph.db_path)
+        return self._sqlite.snapshot_paths() + [
+            graph_path,
+            graph_path.with_name(graph_path.name + ".wal"),
+        ]
+
     # ─── Ingest metadata (key-value store for watermarks/run counts) ──────
 
     def get_meta(self, key: str) -> str | None:
