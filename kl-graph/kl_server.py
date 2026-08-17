@@ -1300,7 +1300,13 @@ async def ingest(req: IngestRequest):
     if not state.ready:
         raise HTTPException(503, "Server not ready")
     if state.backup_active:
-        raise HTTPException(409, "backup/restore in progress; retry shortly")
+        raise HTTPException(
+            409,
+            "backup/restore in progress; retry shortly. "
+            "If you believe it is hung (no backup/restore is actually running), "
+            "restart the server: the barrier is in-memory only and is cleared on "
+            "restart, which is harmless.",
+        )
     input_dir = Path(req.input_dir).expanduser().resolve()
     if not input_dir.is_dir():
         raise HTTPException(400, f"input_dir is not a directory: {input_dir}")
@@ -1343,7 +1349,13 @@ async def improve(req: ImproveRequest):
     if not state.ready:
         raise HTTPException(503, "Server not ready")
     if state.backup_active:
-        raise HTTPException(409, "backup/restore in progress; retry shortly")
+        raise HTTPException(
+            409,
+            "backup/restore in progress; retry shortly. "
+            "If you believe it is hung (no backup/restore is actually running), "
+            "restart the server: the barrier is in-memory only and is cleared on "
+            "restart, which is harmless.",
+        )
 
     run_id = str(uuid.uuid4())
     now = int(time.time())
@@ -1777,7 +1789,13 @@ async def ingest_backup(req: BackupRequest) -> BackupResponse:
     # 互斥屏障：另一个备份或恢复正在进行则拒绝。check-and-set 之间无 await，
     # 单事件循环下天然原子；否则两个备份可并发、且一个的 finally 会过早清屏障。
     if state.backup_active:
-        raise HTTPException(409, "backup/restore in progress; retry shortly")
+        raise HTTPException(
+            409,
+            "backup/restore in progress; retry shortly. "
+            "If you believe it is hung (no backup/restore is actually running), "
+            "restart the server: the barrier is in-memory only and is cleared on "
+            "restart, which is harmless.",
+        )
 
     dest = Path(req.dest_dir)
     if not dest.is_absolute():
@@ -1834,7 +1852,13 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
         )
     # 互斥屏障：恢复与备份、以及另一个恢复互斥（否则恢复会在备份读文件时换/关句柄）。
     if state.backup_active:
-        raise HTTPException(409, "backup/restore in progress; retry shortly")
+        raise HTTPException(
+            409,
+            "backup/restore in progress; retry shortly. "
+            "If you believe it is hung (no backup/restore is actually running), "
+            "restart the server: the barrier is in-memory only and is cleared on "
+            "restart, which is harmless.",
+        )
 
     src = Path(req.src_dir)
     if not src.is_absolute():
@@ -1878,9 +1902,16 @@ async def _do_restore(src: Path, dest_paths: list[Path]) -> RestoreResponse:
     import shutil as _shutil
 
     def _rollback_reopen(exc: Exception) -> None:
-        """回滚到原数据并重开：删本次拷入的新目标、把 move-aside 改回、再 bootstrap。"""
+        """回滚到原数据并重开：删本次拷入的新目标、把 move-aside 改回、再 bootstrap。
+
+        删除必须覆盖**所有**当前存在的 dp，而不仅仅是有 move-aside 记录的那些：
+        快照里可能含原本不存在的元素（可选的 -wal/-shm 边车、社区向量目录等），它们
+        被拷进来后没有对应的 aside 项。若只删有 aside 的，这些「仅快照」文件会残留在
+        改回的原始 store 旁边，污染/破坏回滚后的重开。此处到「把原数据换回」之前，
+        任何存在的 dp 都必然是本次拷入的新文件，一律删除是安全的。
+        """
         for dp in dest_paths:
-            if any(orig == dp for orig, _ in aside) and dp.exists():
+            if dp.exists():
                 if dp.is_dir():
                     _shutil.rmtree(dp, ignore_errors=True)
                 else:

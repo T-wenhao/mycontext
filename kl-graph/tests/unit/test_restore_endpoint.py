@@ -293,7 +293,76 @@ def test_restore_bootstrap_failure_rolls_back_to_old_data(
     state.qdrant_main.close()
 
 
-# ─── Barrier is mutually exclusive (P1 #61) ──────────────────────────────────
+@skip_no_zvec
+def test_restore_rollback_removes_snapshot_only_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """回滚必须删掉「仅快照」目标（恢复前不存在、无 move-aside 记录的那些）。
+
+    这是 #64：快照里可能含恢复期原本不存在的元素（如 knowledge.db-wal 边车）。旧回滚只删
+    有 aside 记录的 dp，这类「仅快照」文件会残留在改回的原始 store 旁边。
+
+    构造真实的「仅快照」场景：SQLite 干净 close 会删掉 -wal/-shm（下面已实测），因此 restore
+    的 _quiesce() 关句柄后 data_dir 里已无 knowledge.db-wal——move-aside 不会为它建 aside 项；
+    随后从快照拷入的 knowledge.db-wal 就是一个无 aside 记录的目标。令重开失败触发回滚，断言
+    它被删除、且原数据完好重开。
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state = kl_server.ServerState()
+    state.ready = True
+    state.startup_time = 0
+    monkeypatch.setattr(kl_server, "state", state)
+    _force_sqlite_backend(monkeypatch)
+
+    _open_stores(data_dir, state)
+    _seed_entity(state, "FAKEENT0001", "张三")  # 原数据计数 1
+    _seed_vector(state, "FAKECHUNK0001")
+
+    snap = tmp_path / "snap"
+    asyncio.run(kl_server.ingest_backup(kl_server.BackupRequest(dest_dir=str(snap))))
+
+    # 关键构造：在快照里放一个 knowledge.db-wal。restore 内部 _quiesce() 关句柄后
+    # live 端的 -wal 会被 SQLite 删除（见 docstring 实测），故它在恢复期无 aside 记录，
+    # 从快照拷入后即成为「仅快照」目标。
+    wal_name = "knowledge.db-wal"
+    (snap / wal_name).write_bytes(b"FAKE_SNAPSHOT_ONLY_WAL_0001")
+
+    # 让重开失败一次以触发回滚（第二次为回滚里的重开，须成功）。
+    real_bootstrap = _open_stores
+    calls = {"n": 0}
+
+    def _bootstrap_first_fails() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated corrupt-snapshot open failure")
+        real_bootstrap(data_dir, kl_server.state)
+
+    monkeypatch.setattr(kl_server, "_bootstrap_stores", _bootstrap_first_fails)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            kl_server.ingest_restore(kl_server.RestoreRequest(src_dir=str(snap)))
+        )
+
+    assert exc.value.status_code == 500
+    # 「仅快照」文件必须在回滚里被删掉。注意重开会重建一个**全新合法**的 -wal，故这里
+    # 不能断言文件不存在，而要断言残留的不是那份「仅快照」哨兵内容——旧的有 bug 的回滚
+    # 只删有 aside 记录的 dp，会把哨兵字节原样留在改回的原始 store 旁边。
+    wal = data_dir / wal_name
+    if wal.exists():
+        assert wal.read_bytes() != b"FAKE_SNAPSHOT_ONLY_WAL_0001"
+    # 原数据完好重开、无 move-aside 残留、屏障已清。
+    assert state.ready is True
+    assert state.store is not None
+    assert state.store.count_entities() == 1
+    assert state.qdrant_main.count("chunks") == 1
+    leftovers = [p.name for p in data_dir.iterdir() if ".restore-old-" in p.name]
+    assert leftovers == []
+    assert state.backup_active is False
+
+    state.store.close()
+    state.qdrant_main.close()
 
 
 def test_restore_rejected_when_barrier_already_held(monkeypatch) -> None:
