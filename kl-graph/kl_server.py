@@ -759,14 +759,96 @@ async def _run_ingest_queue(first: tuple[str, object]) -> None:
         state.ingest_task = None
 
 
-def _bootstrap_stores() -> None:
+class InterruptedRestoreError(RuntimeError):
+    """检测到上一次 /ingest/restore 被中断且原始数据库不可用，拒绝静默空库启动。"""
+
+
+def _knowledge_db_is_healthy(db_path: Path) -> bool:
+    """判断 knowledge.db 是否是一份可用的真实库（而非自动新建的空库/半拷入的破损文件）。
+
+    只读打开（URI mode=ro，绝不触发 sqlite3 的「文件不存在就建空库」）：文件缺失、
+    quick_check 非 ok、或缺核心 chunks 表，都判为不可用。用于启动时区分「目标库完好」
+    与「restore 半换态下目标库被 SIGKILL 打断」。
+    """
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        if not row or row[0] != "ok":
+            return False
+        # 自动新建的空库能通过 quick_check，但没有业务表；用核心表 chunks 兜底区分。
+        has_core = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()
+        return has_core is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _guard_interrupted_restore() -> None:
+    """启动兜底：若上一次 restore 被中断（DATA_DIR 下残留 *.restore-old-*）且当前目标库
+    不可用，则**拒绝启动**并打印人工恢复步骤，绝不静默在空库/破损库上起服务（AGENTS.md §4）。
+
+    只在进程启动路径（lifespan）调用，不用于 restore 自身的进程内重开——那条路径已有
+    _rollback_reopen 负责回滚。restore 从不原地覆盖原数据：它把原文件改名为
+    <name>.restore-old-<ts> 保留、成功重开后才删除。所以这些 aside 副本存在 = 上次 restore
+    没走到清理 = 被中断；此时若目标库已坏，原始好数据仍安然躺在 aside 副本里，可无损恢复。
+    """
+    try:
+        aside = sorted(DATA_DIR.glob("*.restore-old-*"))
+    except OSError:
+        return
+    if not aside:
+        return  # 无中断标记，正常启动。
+
+    if _knowledge_db_is_healthy(SQLITE_PATH):
+        # 目标库完好：restore 成功、只是尽力清理没删干净。保留好库，容忍残留 aside（不动磁盘，
+        # 由运维决定何时清；这里只提示）。
+        logger.warning(
+            "Found leftover %d restore-aside item(s) but knowledge.db is healthy; "
+            "a prior restore likely succeeded and cleanup was interrupted. Leaving "
+            "them in place — remove *.restore-old-* under the data dir when convenient.",
+            len(aside),
+        )
+        return
+
+    # 危险态：目标库缺失/空/破损，且存在 aside 副本 —— 上一次 restore 被中途杀死。
+    # 绝不静默用空库启动；大声拒绝并打印可无损恢复的步骤（改回 aside 后重启 / 或重发 restore）。
+    aside_names = ", ".join(p.name for p in aside)
+    raise InterruptedRestoreError(
+        "Refusing to start: knowledge.db is missing or unusable AND leftover "
+        f"restore-aside copies exist ({aside_names}). A previous /ingest/restore was "
+        "interrupted (e.g. the process was killed mid-swap). Your original data is "
+        "intact in the '*.restore-old-<ts>' copies and was NOT overwritten. To recover, "
+        "in the data dir: (1) delete the partially-copied target(s) "
+        "(knowledge.db and any half-written snapshot files just restored), then "
+        "(2) rename each '<name>.restore-old-<ts>' back to '<name>', then restart the "
+        "server; OR after step (1) restart and re-issue /ingest/restore with a good "
+        "snapshot. Do NOT delete the '*.restore-old-*' copies until recovery succeeds."
+    )
+
+
+def _bootstrap_stores(*, guard_interrupted_restore: bool = False) -> None:
     """打开并预热所有存储句柄（SQLite 连接 + KnowledgeStore + StructuralCache +
     adjacency + pagerank + 主/社区向量库 + QueryEngine），设置 state 上的对应字段。
 
     lifespan 启动与 /ingest/restore 恢复后都调用它 —— 单一建栈路径，避免两处漂移。
     **不**碰 state.ready/startup_time（就绪转换归调用方），**不**重建 loop 绑定的
     query_sema（懒建、按 loop 绑定）。前提：调用前任何旧句柄已关闭（quiesce 后）。
+
+    guard_interrupted_restore：仅进程启动（lifespan）传 True —— 在开任何句柄、尤其在
+    sqlite3.connect 可能自动新建空 knowledge.db **之前**，检测被中断的 restore 并拒绝
+    静默空库启动。restore 自身的进程内重开传 False（它已有 _rollback_reopen 兜底）。
     """
+    if guard_interrupted_restore:
+        _guard_interrupted_restore()
+
     # 1. SQLite (fast)
     logger.info(f"Opening SQLite: {SQLITE_PATH}")
     Path(SQLITE_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -895,7 +977,7 @@ async def lifespan(app: FastAPI):
     t_start = time.time()
     logger.info("=== kl-server starting ===")
 
-    _bootstrap_stores()
+    _bootstrap_stores(guard_interrupted_restore=True)
 
     state.startup_time = time.time() - t_start
     state.ready = True
@@ -1305,7 +1387,10 @@ async def ingest(req: IngestRequest):
             "backup/restore in progress; retry shortly. "
             "If you believe it is hung (no backup/restore is actually running), "
             "restart the server: the barrier is in-memory only and is cleared on "
-            "restart, which is harmless.",
+            "restart. Restarting is safe unless a /ingest/restore was mid-swap when "
+            "killed; in that case the server refuses to start on incomplete data and "
+            "prints recovery steps (your original data is preserved in "
+            "*.restore-old-* copies).",
         )
     input_dir = Path(req.input_dir).expanduser().resolve()
     if not input_dir.is_dir():
@@ -1354,7 +1439,10 @@ async def improve(req: ImproveRequest):
             "backup/restore in progress; retry shortly. "
             "If you believe it is hung (no backup/restore is actually running), "
             "restart the server: the barrier is in-memory only and is cleared on "
-            "restart, which is harmless.",
+            "restart. Restarting is safe unless a /ingest/restore was mid-swap when "
+            "killed; in that case the server refuses to start on incomplete data and "
+            "prints recovery steps (your original data is preserved in "
+            "*.restore-old-* copies).",
         )
 
     run_id = str(uuid.uuid4())
@@ -1794,7 +1882,10 @@ async def ingest_backup(req: BackupRequest) -> BackupResponse:
             "backup/restore in progress; retry shortly. "
             "If you believe it is hung (no backup/restore is actually running), "
             "restart the server: the barrier is in-memory only and is cleared on "
-            "restart, which is harmless.",
+            "restart. Restarting is safe unless a /ingest/restore was mid-swap when "
+            "killed; in that case the server refuses to start on incomplete data and "
+            "prints recovery steps (your original data is preserved in "
+            "*.restore-old-* copies).",
         )
 
     dest = Path(req.dest_dir)
@@ -1857,7 +1948,10 @@ async def ingest_restore(req: RestoreRequest) -> RestoreResponse:
             "backup/restore in progress; retry shortly. "
             "If you believe it is hung (no backup/restore is actually running), "
             "restart the server: the barrier is in-memory only and is cleared on "
-            "restart, which is harmless.",
+            "restart. Restarting is safe unless a /ingest/restore was mid-swap when "
+            "killed; in that case the server refuses to start on incomplete data and "
+            "prints recovery steps (your original data is preserved in "
+            "*.restore-old-* copies).",
         )
 
     src = Path(req.src_dir)

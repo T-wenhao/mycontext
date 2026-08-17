@@ -212,6 +212,37 @@ Response:
   `.wal`, so the restored `(graph.ladybug, .wal)` pair is self-consistent and
   reopens cleanly.
 
+#### If a restore is killed mid-swap (hard crash, not a handled error)
+
+The failure-recoverable path above covers *exceptions* during restore. It does
+**not** cover the process being **killed** (SIGKILL / OOM / power loss) while
+restore is between move-aside and reopen — the barrier is in-memory, and the
+data directory is left half-swapped. Two facts make this safe to recover from:
+
+- Restore **never overwrites originals in place**. It renames each original to
+  `<name>.restore-old-<ts>` and copies the snapshot into a fresh path; the aside
+  copies are deleted **only after** a successful reopen. So a kill can never
+  reach that deletion — **your original data always survives on disk** in the
+  `*.restore-old-<ts>` copies.
+- On the next start, the server runs an **interrupted-restore guard** *before*
+  opening any handle (crucial, because `sqlite3.connect` would otherwise
+  silently create an empty `knowledge.db`). If it finds leftover
+  `*.restore-old-*` copies **and** the live `knowledge.db` is missing / empty /
+  corrupt, it **refuses to start** and logs the recovery steps rather than
+  booting on empty data (a silent-degradation trap — AGENTS.md §4). If the live
+  `knowledge.db` is healthy (restore succeeded, only cleanup was interrupted), it
+  logs a warning about the leftovers and starts normally without touching disk.
+
+**Recovery when the guard refuses to start** (all under the data directory):
+1. Delete the partially-copied target(s) — `knowledge.db` and any snapshot files
+   the interrupted restore had just copied in.
+2. Rename each `<name>.restore-old-<ts>` back to `<name>`.
+3. Restart the server; **or** after step 1, restart and re-issue
+   `POST /ingest/restore` with a good snapshot.
+
+Do **not** delete the `*.restore-old-*` copies until recovery succeeds — they are
+the only intact copy of the pre-restore data.
+
 Status codes: `503` not ready · `409` an ingest/improve job is active (stop it
 first), or a backup/restore is already in progress · `400` `src_dir` is not
 absolute, is not a directory, or is missing a required element (`knowledge.db`;
