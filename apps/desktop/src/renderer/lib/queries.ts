@@ -9,6 +9,7 @@ import type {
   CoverageDomain,
   AttentionModeValue,
   AuthMode,
+  SaveAdvancedAiInput,
   AuthProgress,
   ChannelConversationListView,
   SaveRuntimeConfigInput,
@@ -1684,13 +1685,13 @@ export function useAdvancedAiConfig() {
 export function useSaveAdvancedAiConfig() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (input: {
-      baseUrl: string
-      apiKey: string | null
-      modelRoles: Record<string, string>
-      harness: Record<string, string>
-      rawConfigJson: string | null
-    }) => unwrap(await window.mycontext.advancedAi.save(input)),
+    /**
+     * ★ 类型取自契约（`SaveAdvancedAiInput`），**不再手抄一份字段列表**。
+     * 原来这里 inline 写了一份同名结构，于是契约加字段要同时改两处，
+     * 漏掉这一处的表现是"UI 传了但类型不认"。
+     */
+    mutationFn: async (input: SaveAdvancedAiInput) =>
+      unwrap(await window.mycontext.advancedAi.save(input)),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.advancedAi }),
   })
 }

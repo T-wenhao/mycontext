@@ -25,7 +25,7 @@
  * 只是产 items 的来源从 FTS 换成 ACP 事件流。
  */
 import { join, delimiter } from "node:path"
-import { mkdirSync } from "node:fs"
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import type { BrowserWindow } from "electron"
 import { AppError, type Clock, type Logger } from "@mycontext/kernel"
 import {
@@ -143,6 +143,14 @@ export interface SearchServiceOptions {
    * 与身份无关（走 `skills.paths` 指目录，不拷进 workspace）。
    */
   skillsDir?: string
+  /**
+   * 渠道 CLI skill 用哪一套（`mono` / `multi`）。**函数**而不是值：
+   * 用户在设置里切了之后，下一次建 agent 就要按新的那套走 ——
+   * 装配时读一次的话得重启应用才生效。
+   *
+   * 不给 = 按 `multi`（与 `AdvancedAiConfig` 的默认一致）。
+   */
+  dwsSkillMode?: () => "mono" | "multi"
   /**
    * kl-graph 代码根（含可执行的 `kl`）。用于把 klRoot 前插进 opencode 进程的
    * PATH，让 skill 里的裸 `kl` 命中它。skill 内容本身由 `skillsDir` 提供
@@ -296,6 +304,79 @@ export class SearchService {
     const dirs = this.dirs
     if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，agent 目录未就绪")
     return dirs
+  }
+
+  /**
+   * 造一个只含裸 `dws` 的 shim 目录，返回它的路径（失败返回 null）。
+   *
+   * ## ★★★ 为什么需要这一层
+   *
+   * 渠道 CLI skill 正文通篇写的是裸 **`dws`**（419 个文件、上千条命令示例），
+   * 而磁盘上那个文件叫 **`dws-<平台>`**（`resources/bin/dws-darwin-arm64`）——
+   * 名字对不上，agent 跑 `dws chat message list` 会得到 `command not found`。
+   *
+   * 三条路里选 shim 的理由：
+   *
+   * · **不能改 skill 正文**去写平台全名：那要在净化层做上千处替换，
+   *   且平台后缀随机器变（arm64 / x64 / windows），产物就不可复用了；
+   * · **不能放行 `dws-darwin-arm64`** 这个名字：skill 不会那么写，
+   *   放行一个 agent 永远不用的名字只是让白名单看起来更宽（见
+   *   `KL_SKILL_PERMISSION` 里那条注释）；
+   * · **shim** 让"文件名"这件事只在一个地方解决，且与 `kl` 那侧同构 ——
+   *   `kl` 也是靠一个生成的 wrapper（`installKlWrapper`）让裸 `kl` 可用。
+   *
+   * ## ★★ 为什么是 `exec "$real" "$@"` 而不是软链
+   *
+   * 软链在 macOS 上会让 `process.execPath` 类推导拿到链接名，而更要紧的是
+   * **打包态那份二进制是 adhoc 签名的**（见 `prepare-bin.mjs` 的重签那段）——
+   * 软链不改变签名校验，但它让"到底执行了哪个文件"在日志里多一跳。
+   * 一个两行的 exec 包装更直白，且 `"$@"` 保证参数**原样透传**
+   * （不加引号会让带空格的参数被二次切分 —— 那正是 `dws ... --content "a b"`
+   * 这类命令静默丢参数的成因）。
+   *
+   * ## ★ 放在 agent 的 HOME 下而不是资源目录
+   *
+   * 资源目录在打包态是**只读**的（`.app/Contents/Resources`），往那里写会
+   * EPERM。而 `dirs.home` 是我们自己的可写目录，且它按 vault 隔离 ——
+   * shim 里写的是绝对路径，跟着 vault 走不会有跨身份的陈旧路径。
+   *
+   * ★ 失败**不抛**：拿不到 dws 或写不进去时返回 null，agent 照常起
+   * （少一组渠道工具，图谱检索仍可用）—— 与 skill 缺失同一个降级口径。
+   * 但要记 warn：否则"agent 说它不会查钉钉"没有任何线索。
+   */
+  private ensureDwsShimDir(home: string): string | null {
+    let real: string
+    try {
+      real = this.options.runtime.resolve("dws").path
+    } catch (error) {
+      this.options.logger.warn("dws binary unavailable; channel skills will not work", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
+    // Windows 要 .cmd 才能被 PATH 命中，与 `installKlWrapper` 同一条判据。
+    const shimDir = join(home, "shims")
+    try {
+      mkdirSync(shimDir, { recursive: true })
+      if (process.platform === "win32") {
+        // `%*` 透传全部参数；`@echo off` 避免把命令本身回显进 agent 的输出。
+        writeFileSync(join(shimDir, "dws.cmd"), `@echo off\r\n"${real}" %*\r\n`, "utf8")
+      } else {
+        const shim = join(shimDir, "dws")
+        writeFileSync(
+          shim,
+          `#!/bin/sh\n# 由 MyContext 生成 —— 让 skill 里的裸 dws 命中随包的二进制。\nexec "${real}" "$@"\n`,
+          "utf8",
+        )
+        chmodSync(shim, 0o755)
+      }
+      return shimDir
+    } catch (error) {
+      this.options.logger.warn("dws shim install failed; channel skills will not work", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
   }
 
   /**
@@ -868,9 +949,27 @@ export class SearchService {
        */
       const activated = await this.pythonEnv()
       const basePath = activated?.env["PATH"] ?? process.env["PATH"] ?? ""
+      /**
+       * ★ 渠道 CLI 的 shim 目录（提供裸 `dws`）—— 见 `ensureDwsShimDir`。
+       *
+       * ★★ **前插**（排在 `basePath` 之前）：宿主机上可能另装着一份 `dws`
+       * （内部同学自己装的闭源版，`MYCONTEXT_DWS_SOURCE` 那条路）。
+       * 追加在尾部的话 agent 会命中系统那一份，而它的版本、命令面与登录态
+       * 都可能与我们随包的不同 —— 于是"同一个问题在两台机器上答案不同"，
+       * 且日志里看不出用了哪个二进制。skill 正文是按**随包那份**的版本同步的
+       * （`check:dws-skill-sync` 锁的就是这个配套关系），所以必须让它赢。
+       *
+       * ★ klRoot 仍在最后（`kl` 由 venv/bin 里的 wrapper 提供，见下面那段）。
+       */
+      const dwsShimDir = this.ensureDwsShimDir(this.requireDirs().home)
+      const pathParts = [
+        ...(dwsShimDir === null ? [] : [dwsShimDir]),
+        basePath,
+        this.options.klRoot,
+      ]
       const baseEnv: NodeJS.ProcessEnv = {
         ...(activated?.env ?? process.env),
-        PATH: `${basePath}${delimiter}${this.options.klRoot}`,
+        PATH: pathParts.join(delimiter),
         // 注入 KL_SERVER_PORT 让 kl CLI 连到这个档位对应的那个 kl。
         KL_SERVER_PORT: String(this.klPortFor(scope)),
         /**
@@ -905,12 +1004,39 @@ export class SearchService {
       /**
        * ★ 走 `skills.paths` 指目录，不再靠 create() 时 cpSync。
        *
-       * `skillsDir`（bundled kl）由 paths.ts 提供绝对路径。opencode 的
-       * `skills.paths` 直接读它，无需把内容拷进 search workspace。
+       * `skillsDir`（随包 skill 的**父目录**）由 paths.ts 提供绝对路径。
+       *
+       * ## ★★★ 不能传父目录 —— opencode 是**递归**扫的（实测锁定）
+       *
+       * 一开始按"扫一层 `<path>/<name>/SKILL.md`"写，结论是错的。
+       * 真进程实测（opencode 1.18.11，日志里的 `message=init count=N`）：
+       *
+       * | `skills.paths`                | count |
+       * |-------------------------------|-------|
+       * | 不给（只有内置）              | 1     |
+       * | `skills/`（父目录）           | **16** |
+       * | `skills/` + `skills/dws-multi` | **16** |
+       * | 只给 `skills/dws-multi`       | 14（1 内置 + 13） |
+       * | 只给 `skills/dws-mono`        | 2（1 内置 + 1） |
+       *
+       * 16 = 1 内置 + kl + mono 那 1 个 + multi 那 13 个 —— 也就是说
+       * **传父目录会把两套同时挂上**。再另加一条 dws-multi 是纯冗余（还是 16）。
+       * 另造 `a/b/c/skillx/SKILL.md` 也被扫到 → 递归深度不限。
+       *
+       * 两套同时挂上的代价很具体：同一批渠道命令有**两份**说明进上下文
+       * （mono 那份 2.6MB / multi 那份 3.3MB），而 skill 名字不冲突
+       * （`dws` vs `dingtalk-*`）所以 agent 不会去重 —— 它两份都读，
+       * 于是"切到 mono"这个开关**什么也没改变**，只是让上下文更挤。
+       *
+       * 所以这里**逐个列出**要挂的目录，不给父目录：kl 一条 + 选中那套一条。
        */
       const skillsDir = this.options.skillsDir
-      const skillOption =
-        skillsDir !== undefined && skillsDir !== "" ? { skillPaths: [skillsDir] } : {}
+      const dwsMode = this.options.dwsSkillMode?.() ?? "multi"
+      const skillPaths =
+        skillsDir === undefined || skillsDir === ""
+          ? []
+          : [join(skillsDir, "kl"), join(skillsDir, dwsMode === "mono" ? "dws-mono" : "dws-multi")]
+      const skillOption = skillPaths.length > 0 ? { skillPaths } : {}
       const hardened = buildOpencodeSpawn(
         modelConfig !== null
           ? { baseEnv, modelConfig, allowKlCommand: true, ...homeOption, ...skillOption }

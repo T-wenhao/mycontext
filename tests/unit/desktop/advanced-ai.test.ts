@@ -58,7 +58,7 @@ function makeService() {
     secretStore: secrets,
     runtimeConfig,
   })
-  return { service, secrets, close: () => handle.close() }
+  return { service, secrets, settings, close: () => handle.close() }
 }
 
 describe("读写", () => {
@@ -125,6 +125,59 @@ describe("★ apiKey 不回显完整值", () => {
     expect(context.service.read().apiKeyTail).toBe("9999")
     expect(context.service.read().baseUrl).toBe("y")
     context.close()
+  })
+
+  /**
+   * ★★★ 渠道 skill 形态（mono / multi）—— 这一组锁的是"不传 = 不改"。
+   *
+   * 缺了它的表现很具体且**静默**：用户切到 mono 之后，任何一次不带这个字段的
+   * 保存（比如只改了模型 id）都会把他的选择悄悄改回 multi ——
+   * 而"改回去了"这件事在界面上与"没生效"长得一样。
+   */
+  describe("渠道 skill 形态（dwsSkillMode）", () => {
+    const base = { baseUrl: "x", apiKey: null, modelRoles: {}, harness: {}, rawConfigJson: null }
+
+    it("默认是 multi（全新记录）", () => {
+      const context = makeService()
+      expect(context.service.read().dwsSkillMode).toBe("multi")
+      context.close()
+    })
+
+    it("能切到 mono 并读回", () => {
+      const context = makeService()
+      context.service.save({ ...base, dwsSkillMode: "mono" }, NOW)
+      expect(context.service.read().dwsSkillMode).toBe("mono")
+      context.close()
+    })
+
+    it("★ 传 null / 不传都表示不改（不会把选择落回默认）", () => {
+      const context = makeService()
+      context.service.save({ ...base, dwsSkillMode: "mono" }, NOW)
+      // null = 不改
+      context.service.save({ ...base, baseUrl: "y", dwsSkillMode: null }, NOW)
+      expect(context.service.read().dwsSkillMode).toBe("mono")
+      // 压根不传这个字段 —— 与 null 同义
+      context.service.save({ ...base, baseUrl: "z" }, NOW)
+      expect(context.service.read().dwsSkillMode).toBe("mono")
+      context.close()
+    })
+
+    /**
+     * ★★ 存量记录**没有**这个字段（它是后加的）。读出来必须是 multi，
+     * 而不是 undefined —— undefined 一路传到 search.service 会让
+     * skillPaths 少一项，表现是"升级之后 agent 突然不会查渠道了"且无报错。
+     */
+    it("★ 存量记录（JSON 里没这个字段）读作 multi 而不是 undefined", () => {
+      const context = makeService()
+      // 造一条不含 dwsSkillMode 的旧记录
+      context.settings.set(
+        "advanced_ai_config",
+        JSON.stringify({ modelRoles: {}, harness: {}, rawConfigJson: null }),
+        new Date(NOW).toISOString(),
+      )
+      expect(context.service.read().dwsSkillMode).toBe("multi")
+      context.close()
+    })
   })
 
   it("apiKey 存进 secretStore 而不是明文进 settings", () => {

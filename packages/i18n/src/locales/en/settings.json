@@ -210,6 +210,9 @@
         "summary": "{{label}}: {{count}} {{unit}} since {{from}}, across {{days}} days",
         "allDrained": "All of these days are fully collected (paged to the end).",
         "pending": "{{done}} day(s) fully collected, {{pending}} still backfilling.",
+        "unavailable": "Some {{label}} can't be read with this client (not enabled, or no permission) — the {{count}} {{unit}} already here is the readable part; the rest won't fill in over time.",
+        "moreComing": "More {{label}} is still being listed — continuing next round.",
+        "docDrained": "All reachable {{label}} has been listed.",
         "clamped": "(Counting the last 90 days only; earlier history is still in the learning scope.)",
         "domain": {
           "chat": {
@@ -264,6 +267,13 @@
       "description": "Each module can pick its own agent runtime. The built-in harness spawns no subprocess and is also the fallback when the external runtime is missing.",
       "search": "Search",
       "persona": "Digital twin"
+    },
+    "dwsSkill": {
+      "title": "Channel skill layout",
+      "description": "Which set of the channel CLI's own command docs to load. Applies to new sessions; open ones keep the current set.",
+      "label": "Layout",
+      "multi": "Split per product (leaner context)",
+      "mono": "Single entry point"
     },
     "escape": {
       "title": "Escape hatch",

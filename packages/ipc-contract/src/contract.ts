@@ -3884,6 +3884,13 @@ export const advancedAiConfigViewSchema = z.object({
   harness: z.record(z.string(), z.string()),
   /** 逃生阀：覆盖上面所有推导的原文 JSON */
   rawConfigJson: z.string().nullable(),
+  /**
+   * 渠道 CLI skill 用哪一套：`multi`（按产品拆）/ `mono`（单 skill 全产品）。
+   *
+   * 默认 `multi` —— 搜问的问题绝大多数落在单个产品上，而 mono 那份总入口
+   * 每次都要整份进上下文。理由详见 `AdvancedAiConfig.dwsSkillMode`。
+   */
+  dwsSkillMode: z.enum(["mono", "multi"]),
 })
 
 export type AdvancedAiConfigView = z.infer<typeof advancedAiConfigViewSchema>
@@ -3895,7 +3902,25 @@ export const saveAdvancedAiInputSchema = z.object({
   modelRoles: z.record(z.string(), z.string().max(200)),
   harness: z.record(z.string(), z.string().max(50)),
   rawConfigJson: z.string().max(100_000).nullable(),
+  /**
+   * null = **不改**（沿用已存的）。
+   *
+   * ★ 与 `apiKey` 同一个理由：面板可能只改了模型 id 而不碰这一项，
+   * 那时不能把它落回默认 —— 否则用户选的 mono 会被下一次保存悄悄改回去。
+   * `.default(null)` 让既有调用方（不传这个字段）继续可用。
+   */
+  dwsSkillMode: z.enum(["mono", "multi"]).nullable().default(null),
 })
+
+/**
+ * ★ 导出输入类型，让渲染进程侧**别再手抄一份字段列表**。
+ *
+ * 原来 `queries.ts` 的 mutationFn 里inline 写了一份同名结构，于是加一个字段
+ * 要同时改两处 —— 漏掉那一处的表现是"UI 传了但类型不认"（这次就是这么发现的）。
+ * ★ 用 `z.input` 而不是 `z.infer`：这个 schema 有 `.default(null)`，
+ * `infer` 会把带默认值的字段算成**必填**（输出类型），而调用方本来可以不传。
+ */
+export type SaveAdvancedAiInput = z.input<typeof saveAdvancedAiInputSchema>
 
 /**
  * 自备 dws 的路径配置。

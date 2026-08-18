@@ -459,8 +459,41 @@ function reportOpencode() {
   }
 }
 
+// ---------------------------------------------------------------
+// 渠道 CLI 自带的 skill：随二进制走
+// ---------------------------------------------------------------
+
+/**
+ * 解出渠道 CLI 内嵌的 skill（mono + multi）并净化进 resources/skills。
+ *
+ * ★★ 必须排在 `prepareDws()` **之后**：skill 源内嵌在那个二进制里，
+ * 它还没落到 `resources/bin/` 时同步脚本会直接失败。
+ *
+ * ★ 放在 prepare:bin 里而不是让人手动跑 `pnpm sync:dws-skill`：产物不入 git
+ * （见 .gitignore 里那段），所以新 clone 的机器上它**必须**由某一步自动生成 ——
+ * 否则表现是"agent 说它不会查钉钉"，而没有任何一步报错。
+ *
+ * 失败**不中断整个 prepare**：skill 缺失是能力降级（agent 少一组工具），
+ * 而二进制本身已经就绪、采集链路照常工作。与 `reportOpencode` 的口径一致。
+ */
+function prepareDwsSkills() {
+  const result = spawnSync(process.execPath, [join(root, "scripts/sync-dws-skill.mjs")], {
+    encoding: "utf8",
+    timeout: 300_000,
+  })
+  if (result.status === 0) {
+    console.log("已准备（渠道 CLI skill：mono + multi，已净化）")
+    return
+  }
+  console.warn("⚠ 渠道 CLI skill 未准备好（agent 少一组工具，其余功能不受影响）：")
+  console.warn(
+    `  ${(result.stderr || result.stdout || "").trim().split("\n").slice(-3).join("\n  ")}`,
+  )
+}
+
 prepareDws()
 prepareLarkCli()
 prepareForge()
 prepareOpencode()
 reportOpencode()
+prepareDwsSkills()

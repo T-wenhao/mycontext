@@ -56,7 +56,7 @@ export const DENY_ALL_PERMISSION = {
 } as const
 
 /**
- * 在 deny-all 之上**精确放行 `kl` 命令**（不是放开 `bash`）。
+ * 在 deny-all 之上**精确放行 `kl` 与 `dws` 命令**（不是放开 `bash`）。
  *
  * ## 为什么是这个形状（真进程锁定，见 opencode-permission.test）
  *
@@ -66,20 +66,64 @@ export const DENY_ALL_PERMISSION = {
  * **对象内最后一个匹配的键赢**，所以 `"*":"deny"` 必须写在最前、
  * 具体的 `"kl"/"kl *"` 放行写在其后（实测：反过来 `kl` 会被 `*` 挡住）。
  *
- * · `skill: "allow"` —— agent 靠 opencode 原生 skill 机制调用 kl（`/kl` 展开），
- *   skill 工具本身要放行，否则 `<cwd>/.opencode/skills/kl` 发现了也调不动。
- * · `bash: {"*":"deny","kl":"allow","kl *":"allow"}` —— skill 正文让 agent 跑
- *   `kl ask "…"` 这类命令，只有 `kl`（裸命令）和 `kl <args>` 放行，其余 bash
- *   全 deny。实测：`cat`/`head`/`pwd` 这类在此形态下**硬拒**（无 permission ask，
- *   直接不执行），只有 `kl*` 真的跑起来。
+ * · `skill: "allow"` —— agent 靠 opencode 原生 skill 机制调用（`/kl` 展开），
+ *   skill 工具本身要放行，否则 skill 目录发现了也调不动。
+ * · `bash: {"*":"deny","kl":"allow","kl *":"allow", …}` —— skill 正文让 agent 跑
+ *   `kl ask "…"` 这类命令，只有列出的命令放行，其余 bash 全 deny。
+ *   实测：`cat`/`head`/`pwd` 这类在此形态下**硬拒**（无 permission ask，
+ *   直接不执行），只有白名单里那几个真的跑起来。
  *
- * ★ 放宽一条命令就是扩大攻击面，所以：不放开 bash、只放 `kl`，且有真进程断言
+ * ★ 放宽一条命令就是扩大攻击面，所以不放开 bash、只放具名命令，且有真进程断言
  * （opencode-permission.test 的「kl 允许、非 kl 拒绝」两条）守着这个形状不回退。
+ *
+ * ## ★★★ `read` 与 `dws` 是**显式产品决定**放开的，不是漏网
+ *
+ * ### `read: "allow"`
+ *
+ * 渠道 CLI skill（`resources/skills/dws-mono` / `dws-multi`）有 **419 个
+ * reference 文件**，且 SKILL.md 正文明写「执行任何 dws 操作前 MUST 先用
+ * Read 工具完整读取 dingtalk-shared」。`read` 落在 `"*": "deny"` 里的话，
+ * agent 读不到任何一份命令参考 —— 而那**不会报错**：它只会照着 SKILL.md
+ * 那点摘要去猜参数，然后把猜错的命令跑失败。
+ *
+ * ★ 对比 `kl` 那份 skill：它是**单文件** SKILL.md、零 reference，
+ * 所以 `read` 一直被 deny 也从来没暴露过问题。这是新接的能力带来的新需求，
+ * 不是原来就该放开的东西。
+ *
+ * ★ 放行面：`read` 是 opencode 的**文件读取工具**，不是 shell。
+ * 它读得到 workspace 与 skill 目录（那正是我们要的），
+ * 而 `bash` 那侧的 `cat` 仍然是 deny —— 也就是说 agent 不能用 shell 拼路径
+ * 去读任意文件，只能走那个受工具约束的路径。
+ *
+ * ### `dws` / `dws *`
+ *
+ * ★★ 这一条**放开了 PII 类命令**，是用户明确要求后的决定，记在这里以留痕：
+ * 放行 `dws *` 意味着 agent 能跑 `contact user profile get`（返回银行卡 /
+ * 合同 / 家庭信息 / 学历）、`contact user search-mobile`（按手机号反查人）、
+ * `contact user dismission search`（离职员工名单）。
+ *
+ * 这与 CLAUDE.md §5 那条「PII 类命令不进白名单」**冲突**，也与
+ * `packages/channels/src/plugins/dingtalk/cli.ts` 的 `READ_COMMANDS`
+ * 刻意不收这三条的理由冲突（那里记着一次真实事故：前缀放行顺手放开了整份花名册）。
+ *
+ * 两处的机制本来是分开的 —— `cli.ts` 那张白名单管**我们自己的采集代码**
+ * 走 `DwsCli.run()` 那条路，这里管 **agent 的 bash**。所以这条放行
+ * **不影响**采集侧：采集仍然只跑 `READ_COMMANDS` 里那几条。
+ *
+ * ★ 不写成逐条放行的原因是产品决定要「skill 里所有命令都能跑」；
+ * 逐条放行会让 skill 正文里大量命令恒被拒，而 agent 撞墙后给出的是
+ * 降级答案 —— 那种静默失败比放行面大更难发现。若以后要收窄，
+ * 判据应该对齐 `cli.ts` 的 `READ_COMMANDS` 而不是另造一份。
  */
 export const KL_SKILL_PERMISSION = {
   "*": "deny",
   [`${HOST_TOOL_PREFIX}*`]: "allow",
   skill: "allow",
+  /**
+   * ★ 见上面那段 ★★★：渠道 CLI skill 的 419 个 reference 文件靠它才读得到。
+   * 它是文件读取工具（受工具自身约束），与放开 `bash` 里的 `cat` 不是一回事。
+   */
+  read: "allow",
   bash: {
     "*": "deny",
     kl: "allow",
@@ -97,6 +141,22 @@ export const KL_SKILL_PERMISSION = {
      */
     "KL_SERVER_PORT=* kl": "allow",
     "KL_SERVER_PORT=* kl *": "allow",
+    /**
+     * 渠道 CLI。**见 `KL_SKILL_PERMISSION` 头注释里那段 ★★★** ——
+     * 这一条是显式产品决定，且它放开了 PII 类命令。
+     *
+     * ★ 只放裸命令与带参形态，**不放**环境变量前缀形态（`VAR=x dws …`）：
+     * 实测 419 个 skill 文件里没有任何一条命令用前缀赋值（`grep -E
+     * '[A-Z_]{3,}=[^ ]+ dws'` 零命中），所以那两条会是纯粹的攻击面扩大 ——
+     * `*=* dws *` 能让 agent 设 `PATH` / `LD_PRELOAD`，等于把 deny-all 拆掉。
+     *
+     * ★ 磁盘上的文件名是 `dws-<平台>`，这里放行的是**裸 `dws`** ——
+     * 两者靠 spawn 时前插的 shim 目录对上（见 `search.service.ts` 的 PATH 构造）。
+     * 放行 `dws-darwin-arm64` 这种带平台后缀的名字是错的：skill 正文不会那么写，
+     * 而放行一个 agent 永远不会用的名字只是让白名单看起来更宽。
+     */
+    dws: "allow",
+    "dws *": "allow",
   },
 } as const
 

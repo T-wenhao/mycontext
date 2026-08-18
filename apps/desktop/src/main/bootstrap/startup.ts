@@ -1180,6 +1180,13 @@ export function bootstrapApp(mainDir: string): AppContext {
     processes,
     // kl skill 随包分发；建会话时复制进 workspace（harness 按 cwd 发现 skill）
     skillsDir: paths.skillsDir,
+    /**
+     * 渠道 CLI skill 用哪一套（默认 multi）。
+     *
+     * ★ 函数而不是值：用户在设置里切了之后下一次建 agent 就该生效，
+     * 装配时读一次的话得重启应用。`advancedAi` 在这之前就构造好了（307 行）。
+     */
+    dwsSkillMode: () => advancedAi.read().dwsSkillMode,
     klRoot: paths.klRoot,
     klPort,
     /**

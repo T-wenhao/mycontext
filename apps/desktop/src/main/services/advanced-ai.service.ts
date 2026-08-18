@@ -35,6 +35,25 @@ export interface AdvancedAiConfig {
    * 比让极客去改我们的代码或猜环境变量名要好。
    */
   rawConfigJson: string | null
+  /**
+   * 渠道 CLI skill 用哪一套：`multi`（按产品拆 13 个）或 `mono`（单 skill 全产品）。
+   *
+   * ## ★ 为什么是设置项而不是写死
+   *
+   * 两套是上游**并行维护**的两种形态，各有代价，而"哪套更好"取决于用法：
+   * · `multi` —— 每个产品一个 skill，agent 只加载相关那个，
+   *   上下文省得多；代价是跨产品任务要它自己串起来。
+   * · `mono` —— 一份总入口，跨产品流程（如"从听记建待办"）在一个文件里说清；
+   *   代价是那份 SKILL.md 本身大得多。
+   *
+   * 默认 `multi`：搜问的问题绝大多数落在单个产品上（找会话、查听记、翻文档），
+   * 而 mono 那份总入口每次都要整份进上下文。
+   *
+   * ★ 存进这份配置而不是新开一个设置项：它与 `harness` 是同一类东西
+   * （"agent 的运行时用哪套装配"），而新开一组要再走一遍
+   * 契约 + IPC + preload + 面板四处布线，换来的只是一个更长的键名。
+   */
+  dwsSkillMode: "mono" | "multi"
 }
 
 /** 传给 UI 的形态：apiKey 只给后 4 位。 */
@@ -49,6 +68,15 @@ export interface SaveAdvancedAiInput {
   modelRoles: Record<string, string>
   harness: Record<string, string>
   rawConfigJson: string | null
+  /**
+   * 见 `AdvancedAiConfig.dwsSkillMode`。
+   *
+   * ★ `null` **与"不传"同义**：都表示"不改，沿用已存的"。
+   * 两者都要接受是因为调用方有两类 —— IPC 那侧走 zod（`.default(null)` 会
+   * 把缺失补成 null），而直接调服务的（含既有测试）本来就不传这个字段。
+   * 只收 `null` 会让后者全部类型不过，而它们表达的意图完全一样。
+   */
+  dwsSkillMode?: "mono" | "multi" | null
 }
 
 export interface AdvancedAiServiceOptions {
@@ -88,11 +116,20 @@ export class AdvancedAiService {
             modelRoles: { "embedding.local": resolved.embedModel },
             harness: { search: "opencode-acp", persona: "opencode-acp" },
             rawConfigJson: null,
+            dwsSkillMode: "multi",
           }
         : (() => {
             // 旧记录里可能还带 baseUrl —— 忽略它，baseUrl 现在由真源给。
             const { baseUrl: _legacy, ...rest } = JSON.parse(raw) as AdvancedAiConfig
-            return rest
+            /**
+             * ★ `dwsSkillMode` 是后加的字段：**存量记录里没有它**。
+             *
+             * 不补默认值的话它是 `undefined`，而 `undefined` 一路传到
+             * `search.service.ts` 会让 skillPaths 少一项 —— 表现是
+             * 「升级之后 agent 突然不会查渠道了」，且没有任何报错。
+             * 存量记录一律读作 `multi`（与全新记录同一个默认）。
+             */
+            return { ...rest, dwsSkillMode: rest.dwsSkillMode ?? "multi" }
           })()
 
     // baseUrl / apiKeyTail 都来自真源（单一数据源）
@@ -150,6 +187,13 @@ export class AdvancedAiService {
       modelRoles: input.modelRoles,
       harness: input.harness,
       rawConfigJson,
+      /**
+       * ★ null = 不改 → 读回已存的值（而不是落回默认）。
+       *
+       * 落回默认是错的：用户切到 mono 之后，任何一次**不带这个字段**的保存
+       * （比如只改了模型 id）都会把他的选择悄悄改回 multi。
+       */
+      dwsSkillMode: input.dwsSkillMode ?? this.read().dwsSkillMode,
     }
     this.options.settings.set(SETTING_KEY, JSON.stringify(config), nowIso)
 

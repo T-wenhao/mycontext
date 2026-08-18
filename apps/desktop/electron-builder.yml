@@ -152,8 +152,14 @@ mac:
         - "!workspace/**"
         - "!.gitkeep"
 
-    # ── ② 随包分发的 skill（20K）──────────────────────────────────
-    # `kl` 等。agent 按 cwd/skills.paths 发现它们，不放进去就等于没有。
+    # ── ② 随包分发的 skill（6MB）──────────────────────────────────
+    # `kl`（图谱检索）+ `dws-mono` / `dws-multi`（渠道 CLI 自带，两套并存，
+    # 运行时按设置项选一套 —— 见 search.service.ts 的 skillPaths）。
+    # agent 按 cwd/skills.paths 发现它们，不放进去就等于没有。
+    #
+    # ★ `dws-*` 两个目录是 `prepare:bin` 从二进制内嵌源解出来的产物、不入 git，
+    # 所以**打包前必须跑过 `pnpm prepare:bin`** —— 否则这里静默少两组 skill
+    # （glob 匹配不到就是空，electron-builder 不会因此报错）。
     - from: apps/desktop/resources/skills
       to: skills
       filter: ["**/*"]

@@ -1869,11 +1869,32 @@ export class PersonaService {
   private personaSkillPaths(): string[] {
     const paths: string[] = []
     if (this.options.skillsDir !== undefined && this.options.skillsDir !== "") {
-      if (existsSync(this.options.skillsDir)) {
-        paths.push(this.options.skillsDir)
+      /**
+       * ★★★ 指到 `kl` **子目录**，而不是随包 skill 的父目录。
+       *
+       * 原来这里 push 的是父目录，而实测（opencode 1.18.11）它是**递归**扫的：
+       * 给父目录会把 `dws-mono`（1 个）与 `dws-multi`（13 个）**同时**挂上
+       * —— 日志里 `message=init count=16`，而只给 kl 是 2。
+       *
+       * 对数字分身来说那是两重错：
+       * ① **两套渠道 skill 同时进上下文**（2.6MB + 3.3MB 的命令说明），
+       *    而 mono 与 multi 的 skill 名不冲突（`dws` vs `dingtalk-*`），
+       *    agent 不会去重，两份都读；
+       * ② 更要紧的是**分身的 PATH 里没有裸 `dws`**（那个 shim 只在搜问侧接了，
+       *    见 `search.service.ts` 的 `ensureDwsShimDir`）。于是 agent 会照着
+       *    skill 去调 `dws ...`，每一条都 `command not found` ——
+       *    然后给一个"我查不到"的降级答案，而日志里只有一堆命令失败。
+       *
+       * 渠道 skill 目前**只接搜问**（用户要求的范围）。分身要接的话得同时
+       * 补 shim 与 mono/multi 选择，那是另一件事 —— 在此之前这里必须
+       * 明确只挂 kl，而不是"顺带"把它们带进来。
+       */
+      const klDir = join(this.options.skillsDir, "kl")
+      if (existsSync(klDir)) {
+        paths.push(klDir)
       } else {
         this.options.logger.warn("bundled skills absent; persona cannot query the graph", {
-          source: this.options.skillsDir,
+          source: klDir,
         })
       }
     }

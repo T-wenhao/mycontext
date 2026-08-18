@@ -210,6 +210,9 @@
         "summary": "{{label}}：{{from}} 起已有 {{count}} {{unit}}，覆盖 {{days}} 天",
         "allDrained": "这些天都已采完（翻到没有更多为止）。",
         "pending": "其中 {{done}} 天已采完，{{pending}} 天还在往回补。",
+        "unavailable": "有一部分{{label}}这份客户端读不到（没开通或没权限）—— 已有的 {{count}} {{unit}}是能读到的那部分，剩下的不会随时间补齐。",
+        "moreComing": "还有更多{{label}}没列到 —— 下一轮继续。",
+        "docDrained": "能列到的{{label}}都已列完。",
         "clamped": "（只统计最近 90 天；更早的历史仍在学习范围内）",
         "domain": {
           "chat": {
@@ -264,6 +267,13 @@
       "description": "每个模块可独立选择 Agent 运行方式。内置 harness 不起子进程，也是外部运行时缺失时的降级目标。",
       "search": "搜索模块",
       "persona": "数字分身模块"
+    },
+    "dwsSkill": {
+      "title": "渠道 skill 形态",
+      "description": "渠道 CLI 自带的命令说明用哪一套。改完对新建的会话生效，已开的会话不变。",
+      "label": "形态",
+      "multi": "按产品拆（省上下文）",
+      "mono": "单份总入口"
     },
     "escape": {
       "title": "逃生阀",

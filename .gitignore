@@ -54,6 +54,19 @@ apps/*/resources/forge/
 # 那份入 git；这份是每次打包重算的，不入。
 apps/*/resources/python/
 
+# 同理：渠道 CLI 自带的 skill（mono + multi，421 个文件 / 6MB）是
+# `sync:dws-skill` 从**二进制内嵌源**解出并净化的产物。
+#
+# ★ 为什么不入 git（而 `resources/skills/kl` 入了）：
+# 那份的源是 `kl-graph/`（入 git 的算法团队代码），所以产物与源在同一次
+# checkout 里可比；而这份的源是 `resources/bin/dws-<平台>` —— 那个二进制
+# **不入 git**（走 npm + 解包缓存）。把产物入库会让"库里这份 skill 是哪个
+# 二进制版本解出来的"无从回答，而 `check:dws-skill-sync` 在没有二进制的
+# 机器上是**跳过**的 —— 于是漂移能一路混进发版。
+# 与 `resources/forge` 同一条口径：源不在库里，产物就不入库。
+apps/*/resources/skills/dws-mono/
+apps/*/resources/skills/dws-multi/
+
 # 打包产物（.app / dmg，~600MB 一份）。
 apps/desktop/release/
 

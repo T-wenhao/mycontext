@@ -659,12 +659,12 @@ describe("resolveGatewayModelConfig", () => {
 })
 
 /**
- * ★ 精确放行 `kl` 命令（不放开 bash）—— M5 的安全形状。
+ * ★ 精确放行 `kl` / `dws` 命令（不放开 bash）—— M5 的安全形状。
  *
- * 这里断言的是**我们发出的形状**；「真 opencode 照办（kl 允许、非 kl 拒绝）」
+ * 这里断言的是**我们发出的形状**；「真 opencode 照办（放行的允许、其余拒绝）」
  * 由 tests/externals/opencode-permission.test.ts 的真进程断言锁定。
  */
-describe("KL_SKILL_PERMISSION（精确放行 kl）", () => {
+describe("KL_SKILL_PERMISSION（精确放行 kl / dws）", () => {
   it("`*` 仍是 deny（白名单式，assertHardened 通过）", () => {
     expect(KL_SKILL_PERMISSION["*"]).toBe("deny")
     const spawn = buildOpencodeSpawn({ baseEnv: {}, allowKlCommand: true })
@@ -681,7 +681,43 @@ describe("KL_SKILL_PERMISSION（精确放行 kl）", () => {
     expect(keys.indexOf("*")).toBeLessThan(keys.indexOf("kl"))
   })
 
-  it("skill 工具放行（否则发现了 kl skill 也调不动）", () => {
+  it("★ 渠道 CLI：dws / dws * 放行（skill 正文全靠裸 dws）", () => {
+    const bash = KL_SKILL_PERMISSION.bash as Record<string, string>
+    expect(bash["dws"]).toBe("allow")
+    expect(bash["dws *"]).toBe("allow")
+    // 同一条 findLast 约束：deny 兜底必须在前
+    const keys = Object.keys(bash)
+    expect(keys.indexOf("*")).toBeLessThan(keys.indexOf("dws"))
+  })
+
+  /**
+   * ★★ 放行面不许悄悄变宽：环境变量前缀形态**只对 kl 开**（多图检索需要），
+   * 对 dws **不开** —— `*=* dws *` 能让 agent 设 PATH / LD_PRELOAD，
+   * 那等于把 deny-all 拆掉。实测 419 个 skill 文件里没有任何前缀赋值命令。
+   */
+  it("★ dws 不放行环境变量前缀形态（那会让 agent 能设任意 env）", () => {
+    const bash = KL_SKILL_PERMISSION.bash as Record<string, string>
+    for (const key of Object.keys(bash)) {
+      if (key.includes("dws")) expect(key).toMatch(/^dws( \*)?$/)
+    }
+  })
+
+  /**
+   * ★★★ `read` 放行：渠道 CLI skill 的 419 个 reference 文件靠它才读得到。
+   *
+   * 它落回 `"*": "deny"` 的表现是**静默降级** —— agent 读不到命令参考，
+   * 只能照 SKILL.md 那点摘要猜参数，然后把猜错的命令跑失败。
+   * 而 `bash` 里的 `cat` 仍然是 deny（下一条断言），所以 agent 不能
+   * 用 shell 拼路径读任意文件。
+   */
+  it("★ read 工具放行，但 bash 里的 cat 仍然 deny", () => {
+    expect((KL_SKILL_PERMISSION as Record<string, unknown>)["read"]).toBe("allow")
+    const bash = KL_SKILL_PERMISSION.bash as Record<string, string>
+    expect(bash["cat"]).toBeUndefined()
+    expect(bash["*"]).toBe("deny")
+  })
+
+  it("skill 工具放行（否则发现了 skill 也调不动）", () => {
     expect(KL_SKILL_PERMISSION.skill).toBe("allow")
   })
 
@@ -694,6 +730,7 @@ describe("KL_SKILL_PERMISSION（精确放行 kl）", () => {
     const parsed = JSON.parse(spawn.env["OPENCODE_PERMISSION"] ?? "{}") as Record<string, unknown>
     expect(parsed["bash"]).toBeUndefined()
     expect(parsed["skill"]).toBeUndefined()
+    expect(parsed["read"]).toBeUndefined()
     expect(parsed).toEqual(DENY_ALL_PERMISSION)
   })
 
@@ -702,6 +739,7 @@ describe("KL_SKILL_PERMISSION（精确放行 kl）", () => {
     const parsed = JSON.parse(spawn.env["OPENCODE_PERMISSION"] ?? "{}") as Record<string, unknown>
     expect(parsed["skill"]).toBe("allow")
     expect((parsed["bash"] as Record<string, string>)["kl"]).toBe("allow")
+    expect((parsed["bash"] as Record<string, string>)["dws"]).toBe("allow")
   })
 })
 

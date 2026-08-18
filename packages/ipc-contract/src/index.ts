@@ -234,6 +234,7 @@ export type {
   DashboardTrends,
   DashboardTrendsInput,
   AdvancedAiConfigView,
+  SaveAdvancedAiInput,
   DwsSourceView,
   RuntimeConfigView,
   SaveRuntimeConfigInput,

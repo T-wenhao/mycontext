@@ -13,6 +13,10 @@
  *    这条门禁盯的正是它；
  * ④ opencode 从 `skills.paths` 扫 SKILL.md（是二进制的行为，我们信它但不测它）。
  *
+ * ★ ④ 现在有实测数据了（接渠道 skill 时量的）：它是**递归**扫的，不是一层。
+ * 那个结论直接决定 ③ 该传什么 —— 见下面关键断言处的注释与
+ * `skill-paths-explicit.test.ts` 里那张 count 表。
+ *
  * ## 为什么不再是"拷进 cwd"
  *
  * 曾经的实现是每建一个 search / persona workspace 就 `cpSync` 一份 kl 过去。
@@ -162,8 +166,23 @@ describe("★ 起 opencode 时 `skills.paths` 里有 kl 资源目录", () => {
       const config = JSON.parse(env["OPENCODE_CONFIG_CONTENT"]!) as {
         skills?: { paths?: string[] }
       }
-      // 关键断言
-      expect(config.skills?.paths).toContain(SKILLS_RESOURCE)
+      /**
+       * 关键断言。
+       *
+       * ★★ 判据是 **`skills/kl`（子目录）**，不是父目录 `skills/`。
+       *
+       * 原来这里断言的是父目录，而实测（opencode 1.18.11）它**递归**扫路径：
+       * 给父目录会把 `dws-mono` 与 `dws-multi` 两套渠道 skill 也一起挂上
+       * （日志 `message=init count=16`，只给 kl 是 2）。于是"用户选了 mono"
+       * 这个开关形同不存在，两套命令说明同时进上下文。
+       * 详见 `skill-paths-explicit.test.ts` 里那张实测表。
+       *
+       * 这条测试的**意图不变**（kl 真的到达 agent），只是判据从"父目录在里面"
+       * 收紧成"kl 那条在里面"。
+       */
+      expect(config.skills?.paths).toContain(join(SKILLS_RESOURCE, "kl"))
+      // ★ 不许再出现裸父目录 —— 那会把两套渠道 skill 顺带挂上（见上）
+      expect(config.skills?.paths).not.toContain(SKILLS_RESOURCE)
       // 避免 hang：主动 fail-fast 让 promise 有机会走完
       await Promise.race([turnPromise, new Promise((r) => setTimeout(r, 50))])
     } finally {

@@ -44,6 +44,8 @@ export function AdvancedAiPanel() {
   const [harness, setHarness] = useState<Record<string, string>>({})
   const [escapeHatch, setEscapeHatch] = useState<string | null>(null)
   const [escapeError, setEscapeError] = useState<string | null>(null)
+  /** null = 没动过这个开关（保存时传 null 表示"不改"）。 */
+  const [dwsMode, setDwsMode] = useState<"mono" | "multi" | null>(null)
 
   const current = config.data
   if (current === undefined) return null
@@ -70,6 +72,8 @@ export function AdvancedAiPanel() {
       modelRoles: { ...current.modelRoles, ...roles },
       harness: { ...current.harness, ...harness },
       rawConfigJson: effectiveEscape.trim() === "" ? null : effectiveEscape,
+      // null = 不改（没动过这个开关时不要把它落回默认，见契约里那段）
+      dwsSkillMode: dwsMode,
     })
     setApiKey("")
   }
@@ -157,6 +161,46 @@ export function AdvancedAiPanel() {
             </div>
           </div>
         ))}
+      </Group>
+
+      {/*
+        渠道 CLI skill：mono / multi 二选一。
+        ★ 说清**代价**而不只是名字：这两个词对用户没有信息量，
+        而"省上下文"与"跨产品流程更顺"才是他要在两者间权衡的东西。
+      */}
+      <Group
+        title={t("advancedAi.dwsSkill.title", { defaultValue: "渠道 skill 形态" })}
+        description={t("advancedAi.dwsSkill.description", {
+          defaultValue: "渠道 CLI 自带的命令说明用哪一套。改完对新建的会话生效，已开的会话不变。",
+        })}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <span className="typography-body-small-400 text-[var(--text-base-primary)]">
+            {t("advancedAi.dwsSkill.label", { defaultValue: "形态" })}
+          </span>
+          <div className="inline-flex gap-0.5 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] p-0.5">
+            {(["multi", "mono"] as const).map((option) => {
+              const selected = (dwsMode ?? current.dwsSkillMode) === option
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setDwsMode(option)}
+                  className={cn(
+                    "typography-caption-400 rounded-[var(--radius-sm)] px-2.5 py-1",
+                    selected
+                      ? "bg-[var(--bg-card-z1)] text-[var(--text-base-primary)]"
+                      : "text-[var(--text-base-secondary)]",
+                  )}
+                >
+                  {t(`advancedAi.dwsSkill.${option}`, {
+                    defaultValue: option === "multi" ? "按产品拆（省上下文）" : "单份总入口",
+                  })}
+                </button>
+              )
+            })}
+          </div>
+        </div>
       </Group>
 
       <Group title={t("advancedAi.escape.title")} description={t("advancedAi.escape.description")}>
