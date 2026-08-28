@@ -49,7 +49,7 @@
  */
 import { normalizeUnix } from "./time.js"
 import type { DwsCli } from "./cli.js"
-import type { ChannelDocuments } from "../../types.js"
+import type { ChannelDocuments, DocumentListIncomplete } from "../../types.js"
 
 /**
  * 时间字段 → unix ms，**两种形态都吃**，取不到就 null。
@@ -378,6 +378,18 @@ export function createDingTalkDocuments(cli: Pick<DwsCli, "json">): ChannelDocum
       const items: ParsedDocument[] = []
       const raws: string[] = []
       let truncated = false
+      /**
+       * **为什么**不完整（见契约的 `DocumentListIncomplete`）。
+       *
+       * ★ 按严重度收敛：`unavailable`（终态）压过其余两个。
+       * 理由是出路不同 —— 「还有更多没列到」会自己好，而"没开通/无权限"
+       * 永远不会。一轮里两者都发生时，用户需要知道的是后者。
+       */
+      let incomplete: DocumentListIncomplete | null = null
+      const noteIncomplete = (next: DocumentListIncomplete): void => {
+        if (incomplete === "unavailable") return
+        if (next === "unavailable" || incomplete === null) incomplete = next
+      }
       const cursor = spec.cursor ?? null
       const isFirstRound = cursor === null || cursor === ""
 
@@ -398,19 +410,32 @@ export function createDingTalkDocuments(cli: Pick<DwsCli, "json">): ChannelDocum
             )
             items.push(...nodes.items)
             raws.push(...nodes.rawPayloads)
-            if (nodes.truncated) truncated = true
+            if (nodes.truncated) {
+              truncated = true
+              noteIncomplete("space-truncated")
+            }
           }
           /**
            * `hasMore` 为真说明还有更多知识库没列到。**要报 truncated** ——
            * 这一轮只覆盖了前若干个库，而"少了几个库"在结果里看不出来。
            */
-          if (spaces.hasMore) truncated = true
+          if (spaces.hasMore) {
+            truncated = true
+            noteIncomplete("more-spaces")
+          }
         } catch {
           /**
            * 知识库整段失败（没开通 / 无权限）不影响 drive 那半边。
            * 不抛是刻意的：文档采集是**增益**，一个子域不可用不该让另一个也停。
+           *
+           * ★★★ 但它必须与"还有更多没列到"**分开**报（`unavailable`）：
+           * 前者永远不会好（这个组织没开知识库 / 客户端没权限），
+           * 而混成一个 `truncated` 之后界面会说"还在往回补" ——
+           * 一句永远不兑现的话。实测本机 vault：453 行覆盖面
+           * **全部** `drained=0`，正是这个 catch 每轮命中的结果。
            */
           truncated = true
+          noteIncomplete("unavailable")
         }
       }
 
@@ -433,6 +458,8 @@ export function createDingTalkDocuments(cli: Pick<DwsCli, "json">): ChannelDocum
           recent.page.nextToken === null ? null : `${DRIVE_PREFIX}${recent.page.nextToken}`,
         hasMore: recent.page.hasMore,
         truncated,
+        // ★ 与 `truncated` 并列而不是替换它：既有调用方还在判那个布尔
+        incomplete,
         // 整批原始响应一起进 raw_records（可重放）。分开存会让一轮里
         // 的多次调用各占一行，而它们在语义上是同一次"列文档"。
         rawPayload: JSON.stringify(raws),

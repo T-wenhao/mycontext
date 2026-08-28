@@ -141,6 +141,24 @@ export interface DistillSourceServiceOptions {
    * 不给 = 只存范围、不做后续清理（单测与未接线路径）。
    */
   onScopeChanged?: (channelId: string) => void
+  /**
+   * 读某个渠道**上一轮文档列举为什么不完整**；`null` = 完整或不知道。
+   *
+   * ## ★★ 为什么是注入的回调而不是这一层自己查
+   *
+   * 那个事实只存在于 `IngestService` 的**内存**里（它是"上一轮的结论"，
+   * 刻意不落库 —— 存下来会过期，而过期的方向是显示一个早已解除的不可用）。
+   * 而这一层只读 SQLite，拿不到它。
+   *
+   * 让这一层去持有 `IngestService` 会把一个配置读写服务变成半个应用
+   * （`onScopeChanged` 那个字段的注释记了同一条理由）。
+   *
+   * 不给 = 恒 `null`（单测与未接线路径）。那时界面退回"只说条数"，
+   * 而不是编一个"完整"。
+   */
+  documentsIncomplete?: (
+    channelId: string,
+  ) => "more-spaces" | "space-truncated" | "unavailable" | null
 }
 
 /**
@@ -770,6 +788,8 @@ export class DistillSourceService {
         // ★ 库还没挂上 → 不知道有多少不可读。0 而不是 null：null 的语义是
         //   "这个域没有分区概念"（只有听记），别拿它表达"暂时不知道"
         unreadablePartitions: input.domain === "minutes" ? null : 0,
+        // ★ 库没就绪：`incomplete: null` = "没什么要说的"，而不是"完整"
+        incomplete: null,
       }
     }
     if (input.domain === "doc") return this.documentCoverage(db, input)
@@ -836,6 +856,11 @@ export class DistillSourceService {
       // ★ chat 有专门的覆盖面表、写入侧逐格记账 → accounted
       source: "accounted",
       partitionKind: "conversation",
+      /**
+       * ★ 聊天域没有 `incomplete` 这个概念：它按会话翻页，"齐没齐"已经由
+       * `drainedDays` 表达了（`MIN(drained)` 语义）。给 null 而不是编一个值。
+       */
+      incomplete: null,
     }
   }
 
@@ -894,6 +919,15 @@ export class DistillSourceService {
       source: "accounted",
       // ★ 分区是**空间**（知识库/云盘目录），不是会话 —— 界面据此换量词
       partitionKind: "space",
+      /**
+       * ★★★ 文档是**唯一**有这个字段的域。
+       *
+       * 它回答的是「为什么没列全」，而那三种成因的出路完全不同
+       * （见契约里 `incomplete` 那段）。没有它的话界面只能说
+       * 「还在往回补」—— 而在 `unavailable`（没开通/无权限）下那句话
+       * 永远不会兑现。
+       */
+      incomplete: this.options.documentsIncomplete?.(input.channelId) ?? null,
     }
   }
 
@@ -957,6 +991,8 @@ export class DistillSourceService {
       source: "derived",
       // ★ 不按分区统计
       partitionKind: null,
+      // ★ 听记是全量列举，"不完整"就是 `drained=false`，不需要第二个字段
+      incomplete: null,
     }
   }
 

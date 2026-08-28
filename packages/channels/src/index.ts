@@ -34,6 +34,7 @@ export type {
   ChannelMinutes,
   ChannelMinutesPage,
   ChannelDocuments,
+  DocumentListIncomplete,
   ParsedDocumentLike,
   ParsedMinutesLike,
   ParsedMediaLike,

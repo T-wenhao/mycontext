@@ -802,6 +802,26 @@ export const chatCoverageViewSchema = z.object({
    * 两者必须可区分：前者说"这个问题不适用"，后者说"一切正常"。
    */
   unreadablePartitions: z.number().nullable(),
+  /**
+   * 这个域的采集**为什么**不完整；`null` = 完整，或这个域没有这个概念。
+   *
+   * ## ★★★ 为什么必须有它（这修的是一句永远不兑现的话）
+   *
+   * 文档那一行原来只能说「0 天已采完，62 天还在往回补」—— 实测本机
+   * `document_coverage` **453 行全部 `drained = 0`**，因为
+   * `truncated` 的四个来源里有一个是「知识库整段不可用（没开通/无权限）」
+   * 的 catch，而它每轮都命中。
+   *
+   * 于是「还在往回补」这句话在那种成因下**永远不会兑现** —— 与头像那个
+   * `not_permitted`、消费者那个 `unwired` 是同一个形状：终态被显示成进行中。
+   *
+   * ★ `unavailable` 时界面必须说**出路**（这个组织没开知识库 / 换客户端），
+   * 而不是让用户一直等。
+   *
+   * ★ 只有 `doc` 域会给值：聊天按会话翻页、听记按全量列举，
+   * 它们的"不完整"已经由 `drainedDays` 表达了。
+   */
+  incomplete: z.enum(["more-spaces", "space-truncated", "unavailable"]).nullable().default(null),
 })
 
 /**

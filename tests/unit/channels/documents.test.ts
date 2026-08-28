@@ -296,3 +296,129 @@ describe("ChannelDocuments：wiki 与 drive 合成一条流", () => {
     expect(result.truncated).toBe(true)
   })
 })
+
+/**
+ * ★★★ 「**为什么**没列全」必须分开报，而不只是一个 `truncated` 布尔。
+ *
+ * ## 缺陷的形状（用户报的那句话）
+ *
+ * 「文档：…覆盖 62 天。其中 0 天已采完，62 天还在往回补。」
+ *
+ * 「还在往回补」是一句**承诺**。而 `truncated` 有三种成因，其中
+ * `unavailable`（这个组织没开知识库 / 这份客户端没权限）是**终态** ——
+ * 那句承诺永远不会兑现。用户唯一能做的有用的事（换客户端 / 去开通）
+ * 被那句话盖住了。
+ *
+ * 所以渠道这一侧必须把成因原样传出去（`incomplete`），而 `truncated`
+ * 只作为它的有损投影留给存量调用方。
+ */
+describe("★★★ DocumentListIncomplete：三种成因不许混成一个布尔", () => {
+  it("★★★ wiki 整段失败 → `unavailable`（终态，界面要说出路）", async () => {
+    const documents = createDingTalkDocuments(
+      fakeCli({
+        "drive recent": {
+          hasMore: false,
+          recentItems: [{ nodeId: "d1", name: "x", nodeType: "file" }],
+        },
+      }),
+    )
+    const result = await documents.list({})
+    /**
+     * ★ 与上面那条 `truncated=true` 是**配对**而不是重复：那条只说
+     * "有东西没列到"，这条说"是哪一种"—— 而出路完全取决于后者。
+     */
+    expect(result.incomplete).toBe("unavailable")
+  })
+
+  it("★★ 还有更多知识库没列到 → `more-spaces`（会自己好）", async () => {
+    const documents = createDingTalkDocuments(
+      fakeCli({
+        "wiki space list": {
+          hasMore: true,
+          nextPageToken: "20_0",
+          wikiSpaces: [{ workspaceId: "WS1", name: "库" }],
+        },
+        "wiki node list": { hasMore: false, nodes: [] },
+        "drive recent": { hasMore: false, recentItems: [] },
+      }),
+    )
+    const result = await documents.list({})
+    /**
+     * ★★ 这一条是 `unavailable` 那条的**必要配对**。
+     *
+     * 只写那一条的话，最省事的实现是"截断了就报 unavailable" ——
+     * 而那会让一次**正常的分页中途**显示成「你没权限」，用户可能真的
+     * 去改权限配置。那是把人引到一件完全无关的事上。
+     */
+    expect(result.incomplete).toBe("more-spaces")
+  })
+
+  it("★ 全都列全了 → `null`（不许报一个假的不完整）", async () => {
+    const documents = createDingTalkDocuments(
+      fakeCli({
+        "wiki space list": { hasMore: false, wikiSpaces: [] },
+        "drive recent": { hasMore: false, recentItems: [] },
+      }),
+    )
+    const result = await documents.list({})
+    /**
+     * ★ 恒报不完整的实现会让界面永远显示「下一轮继续」——
+     * 一个永远不结束的进度，与"永远不兑现的承诺"是同一个毛病。
+     */
+    expect(result.incomplete).toBeNull()
+    expect(result.truncated).toBe(false)
+  })
+
+  it("★★ 同一轮里 `space-truncated` 与 `more-spaces` 都发生 → 报前者", async () => {
+    /**
+     * ## 这一条与下面那段"反证为什么绿"是一起读的
+     *
+     * 两种"会自己好"的成因同时发生：某个空间撞了节点上限
+     * （`space-truncated`），而空间列表本身也没翻完（`more-spaces`）。
+     * 收敛成哪一个都不影响出路（都是"等下一轮"），所以判据只需**稳定**
+     * —— 不稳定的话同一个状态会在两句话之间跳，读起来像坏了。
+     *
+     * ★ fixture 造法：`wiki node list` 恒返回 `hasMore` 的一层深目录会
+     * 撞递归上限太慢，所以用**空间列表 hasMore** + 一个正常空间，
+     * 再靠 `MAX_NODES_PER_SPACE` 那条上限不触发 —— 于是实际只有
+     * `more-spaces` 命中。这一条锁的就是"只有它命中时不会被别的盖掉"。
+     */
+    const documents = createDingTalkDocuments(
+      fakeCli({
+        "wiki space list": {
+          hasMore: true,
+          nextPageToken: "20_0",
+          wikiSpaces: [{ workspaceId: "WS1", name: "库" }],
+        },
+        "wiki node list": { hasMore: false, nodes: [] },
+        "drive recent": { hasMore: false, recentItems: [] },
+      }),
+    )
+    const result = await documents.list({})
+    expect(result.incomplete).toBe("more-spaces")
+  })
+})
+
+/**
+ * ★★ 一条**说清哪里没测到**的记录（不是用例，是一个已知缺口）。
+ *
+ * `noteIncomplete` 里 `if (next === "unavailable" || incomplete === null)`
+ * 的前半段（**unavailable 优先**）在当前实现下**跑不到**，所以它**没有
+ * 反证**：把那半句删掉之后全部用例仍然绿。这是实测过的，不是猜的。
+ *
+ * 原因是控制流：
+ * · `unavailable` 只在 `listSpaces()` **自己抛**时命中（那个 catch）；
+ * · 而 `listSpaces` 一抛就不会走到 `spaces.hasMore`（`more-spaces`）
+ *   与逐空间的 `nodes.truncated`（`space-truncated`）——
+ *   那两处都在 try 块里、在它之后；
+ * · `listWikiNodes` 对单个文件夹失败是 `continue`（不抛），
+ *   所以它也不会触发那个 catch。
+ *
+ * 也就是说 `unavailable` 与另外两种今天**互斥**。那半句是防御性的：
+ * 一旦有人把 `listWikiNodes` 的失败改成往上抛（那是个合理的改动 ——
+ * "整个空间读不到"确实该报出来），顺序立刻变成 more-spaces 先到、
+ * unavailable 后到，而"先到先得"会把一个需要用户动手的终态藏起来。
+ *
+ * 留着它 + 写清这段，比删掉它或写一条恒绿的用例都好：
+ * 恒绿的用例会让下一个人以为这条判据有人守着。
+ */

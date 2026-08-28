@@ -630,6 +630,17 @@ export function bootstrapApp(mainDir: string): AppContext {
     /** 主渠道 id —— `save()` 用它判"写主库还是某个渠道库"。 */
     primaryChannelId: dingtalk.meta.id,
     /**
+     * ★★ 文档覆盖面要能说出「为什么没列全」。
+     *
+     * 那个事实只在 `IngestService` 的内存里（上一轮的结论，刻意不落库），
+     * 而覆盖面读出口走的是只读 SQLite —— 所以由数据面按渠道解析后喂进来。
+     *
+     * 不接这条线的后果：`unavailable`（知识库没开通/无权限）会被显示成
+     * 「还在往回补」，而那句话永远不兑现（实测本机 453 行覆盖面全是
+     * `drained=0`，正是这个成因）。
+     */
+    documentsIncomplete: (channelId) => dataPlane.documentsIncomplete(channelId),
+    /**
      * ★★ 用户改了采集范围 → 立刻把三层派生物对齐到新范围。
      *
      * 这条链是「勾选实时生效」的全部实现，四步的顺序都有理由：

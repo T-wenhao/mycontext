@@ -163,6 +163,66 @@ export function ScopeCoverage({
   }
 
   const pendingDays = data.dayCount - data.drainedDays
+  /**
+   * 「齐没齐」那一句。★★★ 文档域**不按天说**，其余两域按天说。
+   *
+   * ## 用户报的问题
+   *
+   * 「文档：2026-05-18 起已有 291 篇，覆盖 62 天。其中 **0 天已采完**，
+   *   62 天还在往回补。」—— 62 天一天都没采完，而那个数字**永远不会动**。
+   *
+   * ## 根因有两层，这里修的是第二层
+   *
+   * 第一层（已在 `ingest.service.ts` 修）：`drained` 原来取 `!listed.truncated`，
+   * 而那个布尔的四个来源里有一个是「知识库整段不可用」的 catch，每轮命中
+   * —— 于是实测 `document_coverage` **453 行全部 `drained=0`**。
+   *
+   * ★★★ 第二层是**粒度错配**，而它不在库里、在这句话里：
+   * `incomplete` 是**整轮列举**的属性，而 `drained` 存在每个 (空间, 天) 上。
+   * 也就是说文档的 `drainedDays` 只有两种取值 —— 0（不完整）或 dayCount
+   * （完整）—— 它**完全由 `incomplete` 决定**，一个字节的额外信息都没有。
+   *
+   * 而这不只是冗余：文档是**按空间**翻页的，一天不存在"翻完"这件事。
+   * 「62 天还在往回补」把一个空间维度的事实说成了时间维度的进度，
+   * 于是用户会等一个不存在的进度条走完。
+   *
+   * 所以文档域三支话都不提天数，只说列举本身的状态；
+   * 而聊天/听记确实是按天翻页的（每个会话逐天回溯），那两域保留天数对。
+   *
+   * ★ `unavailable` 是**终态**，必须说出路（换客户端 / 去开通），
+   * 不能说"在补" —— 那句承诺永远不兑现。这与头像的 `not_permitted`、
+   * 消费者的 `unwired` 是同一个形状。
+   */
+  const progressText =
+    domain === "doc"
+      ? data.incomplete === "unavailable"
+        ? t("status.scope.coverage.unavailable", {
+            defaultValue:
+              "有一部分{{label}}这份客户端读不到（没开通或没权限）——" +
+              "已有的 {{count}} {{unit}}是能读到的那部分，剩下的不会随时间补齐。",
+            label: words.label,
+            count: data.localCount.toLocaleString(),
+            unit: words.unit,
+          })
+        : data.incomplete === null
+          ? t("status.scope.coverage.docDrained", {
+              defaultValue: "能列到的{{label}}都已列完。",
+              label: words.label,
+            })
+          : t("status.scope.coverage.moreComing", {
+              defaultValue: "还有更多{{label}}没列到 —— 下一轮继续。",
+              label: words.label,
+            })
+      : pendingDays === 0
+        ? t("status.scope.coverage.allDrained", {
+            defaultValue: "这些天都已采完（翻到没有更多为止）。",
+          })
+        : t("status.scope.coverage.pending", {
+            // ★ 说"还在回溯"而不是"缺 N 条"——缺多少我们不知道
+            defaultValue: "其中 {{done}} 天已采完，{{pending}} 天还在往回补。",
+            done: data.drainedDays,
+            pending: pendingDays,
+          })
   return (
     <div className="flex flex-col gap-1">
       <p className="typography-caption-400 text-[var(--text-base-secondary)]">
@@ -175,18 +235,7 @@ export function ScopeCoverage({
           days: data.dayCount,
         })}
       </p>
-      <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-        {pendingDays === 0
-          ? t("status.scope.coverage.allDrained", {
-              defaultValue: "这些天都已采完（翻到没有更多为止）。",
-            })
-          : t("status.scope.coverage.pending", {
-              // ★ 说"还在回溯"而不是"缺 N 条"——缺多少我们不知道
-              defaultValue: "其中 {{done}} 天已采完，{{pending}} 天还在往回补。",
-              done: data.drainedDays,
-              pending: pendingDays,
-            })}
-      </p>
+      <p className="typography-caption-400 text-[var(--text-base-tertiary)]">{progressText}</p>
       {/*
         ── ★★★ 三个域的精度不同，必须说出来（修 G15）───────────────
 

@@ -14,6 +14,7 @@ import type {
   ChannelEvents,
   ChannelEventSubscriptionAudit,
   ChannelPlugin,
+  DocumentListIncomplete,
 } from "@mycontext/channels"
 import { extractMentionTexts, mentionsSelf } from "@mycontext/channels"
 import type { PersonaSupervisor } from "@mycontext/persona"
@@ -638,6 +639,20 @@ export class DataPlaneService {
   }
 
   /** 进程内的逐条订阅（数字人用）。vault 未挂载时返回 null。 */
+  /**
+   * 某个渠道上一轮**文档列举为什么不完整**；`null` = 完整 / 不知道。
+   *
+   * ★ 这一层是唯一同时持有「主渠道 + 各来源渠道」两组 `IngestService` 的
+   * 地方（见 `sourceIngest`），所以按渠道解析必须在这里做 ——
+   * 让 `DistillSourceService` 自己去找会让它反向依赖整个数据面。
+   */
+  documentsIncomplete(channelId: string): DocumentListIncomplete | null {
+    if (channelId === this.options.plugin.meta.id) {
+      return this.ingest?.documentsIncompleteReason ?? null
+    }
+    return this.sourceIngest.get(channelId)?.documentsIncompleteReason ?? null
+  }
+
   get events(): IngestService["events"] | null {
     return this.ingest?.events ?? null
   }

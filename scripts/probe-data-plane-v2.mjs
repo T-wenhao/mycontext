@@ -259,6 +259,30 @@ try {
      * 实测撞到过三行完全一样（都是"这段日期还没有记账数据"），
      * 用户根本分不清哪行是哪个域。见 scope-coverage.tsx 里那段 ★★★。
      */
+    /**
+     * ★★★ 顺带读出**文档那一句说了什么**（用户报的正是这一句）。
+     *
+     * 「文档：…覆盖 62 天。其中 0 天已采完，62 天还在往回补。」
+     *
+     * 文档是按空间翻页的，一天不存在"翻完"这件事 —— 那个 62 是空间维度
+     * 的事实被伪装成时间进度。而如果成因是 unavailable（没开通/无权限），
+     * "还在往回补"是一句**永远不兑现的承诺**。
+     *
+     * ★ 判据必须**先切出文档那一句**再判：整段 body 里"往回补"会被
+     * 聊天/听记那两行合法地用到，直接在 body 上判就是一条恒绿的断言
+     * ——那正是这类探针最常见的自欺形式。
+     *
+     * ★★ 这段说明写在注入块**外面**，因为它里面要引用带引号的文案。
+     * 注入模板里一个裸反引号就会把模板提前截断，而报错指向模板开始
+     * 那一行。我刚在这里**又**踩了一次（这轮第三次）：把"往回补"用
+     * 反引号括进了注入块里的注释，`node --check` 直接报
+     * `missing ) after argument list`。
+     *
+     * ★★★ 而 `check-probe-templates.mjs` **没抓到它** —— 它只查代码里的
+     * 裸反引号，不查注释里的。这是那个门禁的一个真实缺口
+     * （记在这里而不是顺手改门禁：改它要先想清"注释里的反引号"怎么
+     * 与合法的模板嵌套区分开）。
+     */
     const ui = await evaluate(`(() => {
       const text = document.body.textContent ?? ""
       const rows = [
@@ -275,7 +299,19 @@ try {
           minutes: text.includes("会议听记："),
           doc: text.includes("文档："),
         },
-        saysUnwiredReason: text.includes("向量检索") || text.includes("本期未接入"),
+        saysUnwiredReason: text.includes("向量检索") || text.includes("没有接线"),
+        // 文档那一句（说明见注入块外面那段 ★★★）
+        docSentence: (() => {
+          const rows = [...document.querySelectorAll("p")]
+            .map((n) => n.textContent ?? "")
+            .filter((t) => t.startsWith("文档："))
+          if (rows.length === 0) return null
+          // 摘要那一段的**下一个** <p> 就是"齐没齐"那一句
+          const summary = rows[0]
+          const all = [...document.querySelectorAll("p")].map((n) => n.textContent ?? "")
+          const at = all.indexOf(summary)
+          return [summary, all[at + 1] ?? ""].join(" | ")
+        })(),
       }
     })()`)
     facts.ui = ui
@@ -290,6 +326,20 @@ try {
     }
     if (ui.saysUnwiredReason !== true) {
       problems.push("unwired 那一行没说清「为什么没接」（读起来像「未注册」）")
+    }
+    /**
+     * ★★★ 文档那一句不许出现天数对。
+     *
+     * 这一条是用户报的那个缺陷的**唯一**真机判据：单测能锁"走了哪一支"，
+     * 而"三行合在一起读起来对不对"只有真应用能回答（i18n 在单测里是
+     * 不做插值的桩）。
+     */
+    if (typeof ui.docSentence === "string") {
+      for (const banned of ["天还在往回补", "天已采完"]) {
+        if (ui.docSentence.includes(banned)) {
+          problems.push(`文档那一行仍在按「天」说进度（含「${banned}」）：${ui.docSentence.trim()}`)
+        }
+      }
     }
   }
 } catch (error) {

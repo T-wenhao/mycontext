@@ -22,7 +22,11 @@ import { EventEmitter } from "node:events"
 import { randomUUID } from "node:crypto"
 import type { Clock, Logger } from "@mycontext/kernel"
 import { isAppError } from "@mycontext/kernel"
-import type { ChannelConversationItem, ChannelPlugin } from "@mycontext/channels"
+import type {
+  ChannelConversationItem,
+  ChannelPlugin,
+  DocumentListIncomplete,
+} from "@mycontext/channels"
 import { createDistillHandler, DISTILL_CONSUMER_ID } from "@mycontext/distill"
 import { type IngestSnapshot as ContractIngestSnapshot } from "@mycontext/ipc-contract"
 import {
@@ -835,6 +839,18 @@ export class IngestService {
    * "声明漏了 xx" 每秒刷一条，把真正的异常淹掉。空串 = 当前没有问题。
    */
   private lastTopologyProblems = ""
+  /**
+   * 文档列举上一轮**为什么**不完整；`null` = 完整（或还没跑过）。
+   *
+   * ## ★★ 为什么必须进快照（不能只写日志）
+   *
+   * `unavailable`（知识库没开通 / 无权限）是**终态**：文档永远只会有云盘
+   * 那半边。而界面现在把它显示成「还在往回补」—— 一句永远不兑现的话。
+   *
+   * ★ 只在内存里（不落库）：它是"上一轮的事实"，与 `lastCycle` 同一个
+   * 取舍 —— 存下来会过期，而过期的方向是显示一个早已解除的不可用。
+   */
+  private documentsIncomplete: DocumentListIncomplete | null = null
   /**
    * 会话目录的缓存（三路合并实测 4.8s，比扫描周期还长 —— 不能每轮重取）。
    * null = 还没取过或已过期。
@@ -1800,8 +1816,35 @@ export class IngestService {
             }),
         },
         listed.items,
-        // ★ 截断了就是没抽干。恒 true 会把"还有更多知识库没列到"显示成"已采完"
-        { drained: !listed.truncated },
+        /**
+         * 「列全了」才算抽干。判据写 `incomplete === null` 而不是 `!truncated`。
+         *
+         * ## ★★ 先说清：这一行**不改变行为**（实测反证过）
+         *
+         * 渠道那侧三处截断站点是 `truncated = true` 与 `noteIncomplete(...)`
+         * **成对**设置的（见 `documents.ts`），所以 `!listed.truncated` 与
+         * `(incomplete ?? null) === null` 恒等。把判据改回 `!truncated` 之后
+         * `document-coverage-drained.test.ts` 五条全绿 —— 那是对的，
+         * 不是测试写漏了。
+         *
+         * 换判据的理由只有一个：`incomplete` 是**带成因**的那个字段，而
+         * `truncated` 是它的有损投影。以后新增一种成因时，写进 `noteIncomplete`
+         * 就自动进这个判据；而 `truncated` 需要有人记得同时设 ——
+         * 那个"记得"就是缺陷的入口。
+         *
+         * ## ★★★ 用户报的那个缺陷不在这一行，在读出口
+         *
+         * 实测本机 vault：`document_coverage` **453 行全部 drained=0**，
+         * 一行 1 都没有。根因是那个"知识库整段不可用"的 catch 每轮命中，
+         * 而 `incomplete` 是**整轮**的属性、`drained` 却存在每个 (空间, 天) 上
+         * —— 于是"一个空间读不到"把全部天判成没抽干。
+         *
+         * 这个粒度错配**没法在写入侧修**（我们确实不知道"这一天列全了没"，
+         * 文档按空间翻页，一天不存在"翻完"这件事）。所以库这一层保持保守
+         * （如实记 0，不假装采完），由界面负责不把它说成时间维度的进度 ——
+         * 见 `scope-coverage.tsx` 的 `progressText`：文档域三支话一个"天"字都不提。
+         */
+        { drained: (listed.incomplete ?? null) === null },
       )
 
       /**
@@ -1826,15 +1869,32 @@ export class IngestService {
         this.lastDroppedAt = now
       }
 
+      /**
+       * ★★ 记住**为什么**不完整，让快照/界面能说出**出路**。
+       *
+       * 三种成因的出路完全不同（见契约的 `DocumentListIncomplete`）：
+       * · `more-spaces` / `space-truncated` → 会自己好，说"在补"是对的；
+       * · `unavailable` → **永远不会好**（没开通/无权限），必须说
+       *   "文档只覆盖云盘那半"或"换一份有权限的客户端"。
+       *
+       * 混成一个 `truncated` 的后果实测过：界面显示「62 天还在往回补」，
+       * 而那句话永远不兑现 —— 与头像那个 `not_permitted`、消费者那个
+       * `unwired` 是同一个形状（终态被显示成进行中）。
+       */
+      this.documentsIncomplete = listed.incomplete ?? null
       if (listed.truncated) {
         /**
          * ★ 截断必须**报出来**，不能只体现在条数上。
          *
-         * 撞了递归深度 / 单库上限 / 还有更多知识库没列到 —— 三种都会让
-         * 这一轮的文档数少于真实值，而"少了"在界面上与"就这么多"无法区分。
+         * 撞了递归深度 / 单库上限 / 还有更多知识库没列到 / 子域不可用 ——
+         * 四种都会让这一轮的文档数少于真实值，而"少了"在界面上与
+         * "就这么多"无法区分。
+         *
+         * ★ `unavailable` 用 warn 且带上原因：那是唯一需要用户动手的一种。
          */
-        this.options.logger.warn("documents listing truncated; coverage is partial", {
+        this.options.logger.warn("documents listing incomplete; coverage is partial", {
           listed: listed.items.length,
+          reason: listed.incomplete ?? "unknown",
         })
       }
 
@@ -4796,6 +4856,17 @@ export class IngestService {
    * 每次调用都是主进程的一段硬阻塞。因此**不要在逐条消息的路径上调它**，
    * 只能由 batch 结束或节流后的推送触发（见 data-plane.service 的 pushSnapshot）。
    */
+  /**
+   * 上一轮文档列举**为什么**不完整；`null` = 完整，或还没跑过一轮。
+   *
+   * ★ 单独暴露而不是塞进 `snapshot()`：覆盖面那条读出口走的是
+   * `chatCoverage` 通道（只读 SQLite），它拿不到快照。而这个事实**只在
+   * 内存里**（刻意不落库，见字段注释）——所以只能由调用方按渠道来问。
+   */
+  get documentsIncompleteReason(): DocumentListIncomplete | null {
+    return this.documentsIncomplete
+  }
+
   snapshot(): IngestSnapshotPart {
     const channelId = this.options.plugin.meta.id
     const messages = new MessageRepository(this.options.db)

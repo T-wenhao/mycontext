@@ -33,7 +33,7 @@ export interface ChannelCapabilities {
   /** 是否有廉价的「有无新消息」探针（有则宿主用两级轮询省开销） */
   changeProbe: boolean
   media: boolean
-  /** 发送身份。钉钉本期只用 self */
+  /** 发送身份。钉钉只用 self */
   sendAs: ("self" | "bot")[]
   domains: ("chat" | "doc" | "minutes" | "contact")[]
   /**
@@ -638,6 +638,20 @@ export interface ParsedDocumentLike {
  * 才返回 —— 而那期间采集锁被占着，消息侧收不到新消息。
  * 分开之后上层可以「先全量列元信息、每轮只补 N 篇正文」（与听记同款策略）。
  */
+/**
+ * 文档列举**为什么**不完整。见 `ChannelDocuments.list` 的 `incomplete`。
+ *
+ * ★ 三个值按「会不会好」分成两档：前两个会（继续列/下一轮），
+ * `unavailable` **永远不会**（没开通 / 无权限）。界面必须据此说不同的话。
+ */
+export type DocumentListIncomplete =
+  /** 还有更多空间（知识库）没列到 —— 下一轮继续 */
+  | "more-spaces"
+  /** 某个空间内部撞了防御性上限（递归深度 / 节点数） */
+  | "space-truncated"
+  /** 某个子域整段不可用（没开通 / 无权限）。**终态** */
+  | "unavailable"
+
 export interface ChannelDocuments {
   /**
    * 列文档元信息（不含正文）。一次返回一批，`hasMore` 为翻页判据。
@@ -652,8 +666,37 @@ export interface ChannelDocuments {
     /**
      * 是否因为防御性上限而**截断**了（递归深度 / 单库节点数）。
      * ★ 必须能表达：截断不可见的话下游会把"只采了 500 篇"当成"一共 500 篇"。
+     *
+     * ★★ 这个布尔**表达力不够**（见下面 `incomplete`）：它把"还有更多没列到"
+     * 与"这个子域压根不可用"混成一个，而两者的出路相反。保留它是为了
+     * 兼容既有调用方；新代码判 `incomplete`。
      */
     truncated: boolean
+    /**
+     * 这一轮**为什么**不完整；`null` = 完整（真的列全了）。
+     *
+     * ## ★★★ 为什么一个布尔不够（这修的是一个真实的谎）
+     *
+     * `truncated` 有四个来源，而它们在界面上的**出路完全不同**：
+     *
+     * | 成因 | 用户该知道什么 | 会好吗 |
+     * |---|---|---|
+     * | 还有更多知识库没列到（`hasMore`） | 在往回补，等一会儿 | **会** |
+     * | 某个库的节点撞了递归/条数上限 | 那个库只覆盖了一部分 | 部分会 |
+     * | 知识库**整段不可用**（没开通/无权限） | 文档只有云盘那半，别等了 | **永远不会** |
+     *
+     * 混成一个布尔的后果（实测本机 vault）：`document_coverage` 里
+     * **453 行全部 `drained = 0`**、一行 1 都没有 —— 于是界面显示
+     * 「0 天已采完，62 天还在往回补」。而如果成因是"知识库没开通"，
+     * 那句"还在往回补"**永远不会兑现**。
+     *
+     * 那与本仓库已经修过两次的形状完全一样：**终态被显示成进行中**
+     * （头像那个 `not_permitted`、消费者那个 `unwired`）。
+     *
+     * ★ `unavailable` 是**终态**：重试永远同一个答案，界面必须说出路
+     * （换一份有权限的客户端 / 这个组织没开知识库），而不是"在补"。
+     */
+    incomplete?: DocumentListIncomplete | null
     rawPayload: string
   }>
   /**
