@@ -733,6 +733,51 @@ export function classifyDwsError(output: string): AppError | null {
           context: { serverErrorCode: envelope.serverErrorCode, reason: variant.reason },
         })
       }
+      /**
+       * ★★★ `1001` + `Decode parameter error` 是**我们自己传错了参数**，
+       * 不是"保密群"。
+       *
+       * ## 实测（用户日志，`im/list_group_member_by_ids`）
+       *
+       * ```
+       * listGroupMembersByUids error: Decode parameter error: 2
+       * server_error_code: 1001    server_key: im
+       * ```
+       *
+       * 上游把 `1001` 当成一个通用的 im 错误码复用了（这已经是第三种含义：
+       * 保密群 / org not match / 参数解不开）。而归成 `RESOURCE_FORBIDDEN`
+       * 之后调用方会把它**静默跳过**并记成"这个群读不到"——
+       * 于是一个我们能自己修的 bug 被记成了对方的权限问题，
+       * 而排查的人看日志只会看到"保密群"。
+       *
+       * ## ★ 归 `INVALID_INPUT`（终态，但归因指向我们）
+       *
+       * · 仍然 `retryable: false` —— 同样的参数再传一百次也是同一个结果；
+       * · 但**不是** RESOURCE_FORBIDDEN：那个码的语义是"服务端拒绝给你"，
+       *   而这里服务端压根没读懂请求。两者的修法一个在对方、一个在我们。
+       *
+       * ★ `context` 里带上原始 message：`Decode parameter error: 2` 里那个
+       * `2` 大概是出错的参数序号（未证实 —— 没有可复现的环境，所以
+       * **不猜**，原样留给日志）。
+       */
+      if (
+        envelope.serverErrorCode === "1001" &&
+        output.toLowerCase().includes("decode parameter error")
+      ) {
+        return new AppError(
+          "CHANNEL_BAD_PARAMETER",
+          "渠道命令的参数服务端解不开（是我们传错了，不是无权限）",
+          {
+            retryable: false,
+            messageKey: "errors:byCode.CHANNEL_BAD_PARAMETER",
+            context: {
+              serverErrorCode: envelope.serverErrorCode,
+              reason: "decode_parameter_error",
+              detail: envelope.message ?? null,
+            },
+          },
+        )
+      }
       const mapped = SERVER_ERROR_CODES[envelope.serverErrorCode]
       if (mapped !== undefined) {
         return new AppError(mapped.code, mapped.message, {

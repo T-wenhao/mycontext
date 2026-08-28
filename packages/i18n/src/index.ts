@@ -87,7 +87,7 @@ export type { Language, LanguagePreference }
  * 把系统语言映射到支持的语言。
  *
  * 只看前缀：`zh-CN` / `zh-TW` / `zh-Hant` 都归到 zh。
- * 本期不区分简繁——给繁体用户看简体，比给他们看英文更接近他们想要的。
+ * 不区分简繁——给繁体用户看简体，比给他们看英文更接近他们想要的。
  */
 export function detectSystemLanguage(locale?: string): Language {
   const tag = (locale ?? (typeof navigator === "undefined" ? "" : navigator.language)).toLowerCase()

@@ -294,6 +294,41 @@ describe("错误归类：区分终态与可重试", () => {
     expect(error?.context?.["reason"]).toBe("org_not_match")
   })
 
+  /**
+   * ★★★ `1001` + `Decode parameter error` 是**我们自己传错参数**。
+   *
+   * ## 用户报的现象
+   *
+   * 「为什么我钉钉渠道获取下头像失败」+ 一段日志：17 秒里 15 次
+   * `listGroupMembersByUids error: Decode parameter error: 2`，
+   * `server_error_code: 1001` / `server_key: im`。
+   *
+   * 改动前它落到 `RESOURCE_FORBIDDEN` → `mediaIdFromGroup` 的 catch
+   * **静默跳过**这个群 → `group_unreadable` → 界面记成可重试的 `failed`。
+   * 于是一个我们能自己修的 bug 被永久记成"对方的保密群"，
+   * 而排查的人看日志只看到"保密群"。
+   *
+   * ★ 归 `CHANNEL_BAD_PARAMETER`：仍然是终态（同样的参数再传一百次也一样），
+   * 但**归因指向我们**，所以调用方不会把它当权限墙跳过。
+   */
+  it("★★★ 1001 + Decode parameter error → CHANNEL_BAD_PARAMETER（不是保密群）", () => {
+    const output = JSON.stringify({
+      error: {
+        category: "api",
+        code: 5,
+        server_error_code: "1001",
+        server_key: "im",
+        message: "Decode parameter error: 2",
+      },
+    })
+    const error = classifyDwsError(output)
+    /** 反证：把那一支 if 去掉 ⇒ 落到 SERVER_ERROR_CODES["1001"] ⇒ RESOURCE_FORBIDDEN ⇒ 转红。 */
+    expect(error?.code).toBe("CHANNEL_BAD_PARAMETER")
+    // ★ 终态：重试没有意义（与保密群一致，但成因完全不同）
+    expect(error?.retryable).toBe(false)
+    expect(error?.context?.["reason"]).toBe("decode_parameter_error")
+  })
+
   it("1001 的保密群错误仍保留原有分类与文案", () => {
     const output = JSON.stringify({
       error: {

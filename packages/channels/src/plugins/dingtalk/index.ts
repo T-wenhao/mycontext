@@ -1,8 +1,8 @@
 /**
  * 钉钉渠道插件。
  *
- * capabilities 反映的是第一期的真实能力：
- * - ingest 只有 poll（本人身份走 dws CLI 拉取；机器人推送本期不做）
+ * capabilities 反映的是当前的真实能力：
+ * - ingest 只有 poll（本人身份走 dws CLI 拉取；机器人推送没做）
  * - changeProbe 为 true（实测 list-unread-conversations 仅 0.7s，可作廉价探针）
  * - sendAs 只有 self（以本人身份回复，不建机器人）
  */

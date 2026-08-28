@@ -165,6 +165,64 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
   return result.data
 }
 
+/**
+ * 头像取不到的原因，**按"对用户有多少用"排序**。
+ *
+ * ★★ 一批里可能既有"对方没设头像"（用户什么都不用做）又有"客户端没权限"
+ * （唯一有效的出路是换客户端）。报后者，因为它是唯一**可执行**的那个。
+ *
+ * ★ `not_permitted` 排第一：它是终态**且**有明确出路。
+ * `failed` 第二（值得等一下再试）。三个"用户什么都做不了"的排最后 ——
+ * 它们更接近"正常"而不是"故障"。
+ *
+ * ★ 提到模块级是为了能单测：这张表的**顺序**就是判据本身，
+ * 而它原来埋在一个 IPC handler 的闭包里，一条用例都碰不到。
+ */
+export const AVATAR_REASON_PRIORITY = [
+  "not_permitted",
+  "failed",
+  "not_attempted",
+  "not_reachable",
+  "not_set",
+] as const
+
+export type AvatarMissReasonName = (typeof AVATAR_REASON_PRIORITY)[number]
+
+/** 在 `prev` 与 `next` 里取**更值得告诉用户**的那个（不认识的原因忽略）。 */
+export function worseAvatarReason(
+  prev: AvatarMissReasonName | null,
+  next: string | null,
+): AvatarMissReasonName | null {
+  const at = AVATAR_REASON_PRIORITY.indexOf(next as AvatarMissReasonName)
+  if (at === -1) return prev
+  const now = prev === null ? Infinity : AVATAR_REASON_PRIORITY.indexOf(prev)
+  return at < now ? (AVATAR_REASON_PRIORITY[at] ?? prev) : prev
+}
+
+/**
+ * 这个失败原因是**整轮**的属性，还是**这个人**的属性？
+ *
+ * ## ★★★ 判据为什么是这个，而不是"有多严重"
+ *
+ * 实测（用户日志）：17 秒里 15 次 `listGroupMembersByUids error`，
+ * 每次 2-3 个子进程 —— 而它们**全是同一个错**。那不是 15 个人各自的问题：
+ * `not_permitted` 说的是"这份客户端对这个企业没开通该能力"，
+ * 第 1 个人撞到它，第 60 个人一定也撞到（同一个 OAuth 客户端、同一个企业）。
+ * 继续循环的收益恒为零，代价是几十次子进程 + 十几秒卡顿，而用户看到的
+ * 只是"刷新头像转了很久然后什么都没变"。
+ *
+ * ★★ 而 `failed` **不能**短路：它是可重试的（子进程超时、网络抖动），
+ * 确实可能只影响一个人、下一个就好了。对它短路会把一次抖动变成
+ * "整批放弃" —— 那正是 `mediaAvatarsFetch` 的注释里说要避免的
+ * "一个人的超时带走整批"。
+ *
+ * 剩下三个（not_set / not_reachable / not_attempted）压根不是故障，
+ * 更不该中断整轮。
+ */
+export function isWholeRoundAvatarWall(reason: AvatarMissReasonName | null): boolean {
+  return reason === "not_permitted"
+}
+
 const statusInputSchema = z.object({
   channelId: z.string().min(1),
   refresh: z.boolean().optional(),
@@ -630,32 +688,24 @@ export function registerIpc(deps: IpcDependencies): void {
       const input = parse(mediaAvatarsInputSchema, payload)
       let fetched = 0
       let failed = 0
-      /**
-       * 最值得告诉用户的那个失败原因（见契约里 `avatarFetchResultSchema.reason`）。
-       *
-       * ★★ 选取判据是**优先级**而不是"最后一个" —— 一批里可能既有
-       * "对方没设头像"（用户什么都不用做）又有"客户端没权限"
-       * （唯一有效的出路是换客户端）。报后者，因为它是唯一**可执行**的那个。
-       *
-       * ★ `not_permitted` 排第一：它是终态**且**有明确出路。
-       * `failed` 第二（值得等一下再试）。三个"用户什么都做不了"的排最后 ——
-       * 它们更接近"正常"而不是"故障"。
-       */
-      const REASON_PRIORITY = [
-        "not_permitted",
-        "failed",
-        "not_attempted",
-        "not_reachable",
-        "not_set",
-      ] as const
-      let reason: (typeof REASON_PRIORITY)[number] | null = null
+      /** 最值得告诉用户的那个失败原因（判据见 `AVATAR_REASON_PRIORITY`）。 */
+      let reason: AvatarMissReasonName | null = null
       const noteReason = (next: string | null): void => {
-        const at = REASON_PRIORITY.indexOf(next as (typeof REASON_PRIORITY)[number])
-        if (at === -1) return
-        const now = reason === null ? Infinity : REASON_PRIORITY.indexOf(reason)
-        if (at < now) reason = REASON_PRIORITY[at] ?? null
+        reason = worseAvatarReason(reason, next)
       }
+      /**
+       * ★★★ 撞到**整轮性**的终态就停，别把每个人都试一遍
+       * （判据与理由见 `isWholeRoundAvatarWall`）。
+       *
+       * ★ 已经处理过的人照常计数；剩下的**不计入 failed** —— 我们没试过，
+       * 报成失败会让"取不到几个"这个数字失真。`reason` 已经说清了原因。
+       */
+      let skippedAfterWall = 0
       for (const externalId of input.externalIds) {
+        if (isWholeRoundAvatarWall(reason)) {
+          skippedAfterWall += 1
+          continue
+        }
         /**
          * ★ `nick` 必须传下去。
          *
@@ -703,6 +753,16 @@ export function registerIpc(deps: IpcDependencies): void {
             detail: error instanceof Error ? error.message : String(error),
           })
         }
+      }
+      if (skippedAfterWall > 0) {
+        /**
+         * ★ 短路要**留痕**：静默少跑几十次是"我们主动放弃了"，
+         * 而日志里看不到的话下一个排查的人会以为那些人被试过且成功了。
+         */
+        logger.info("avatar fetch stopped early: whole-round permission wall", {
+          skipped: skippedAfterWall,
+          tried: fetched + failed,
+        })
       }
       return { fetched, failed, reason }
     }),

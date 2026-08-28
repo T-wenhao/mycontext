@@ -281,9 +281,9 @@ function ConsumerRow({ consumer }: { consumer: ConsumerStatusView }) {
          *
          * 「未启用」读起来像"去设置里打开它"，而这里根本没有那个开关 ——
          * `unwiredReason` 才是用户需要的那句话（如"向量检索要远程
-         * embedding，本期不默认开启"）。与域的 `absentReason` 同一条判据。
+         * embedding，目前没有接线"）。与域的 `absentReason` 同一条判据。
          */
-        (consumer.unwiredReason ?? t("status.topology.unwired", { defaultValue: "本期未接入" }))
+        (consumer.unwiredReason ?? t("status.topology.unwired", { defaultValue: "没有接线" }))
       : state === "absent"
         ? t("status.topology.absent", { defaultValue: "未注册（这套部署里没有它）" })
         : state === "rebuild"

@@ -79,6 +79,25 @@ export const ERROR_CODES = [
   "CHANNEL_IDENTITY_UNAVAILABLE",
   /** 外部数据格式与预期不符（时间串、分页结构等） */
   "PARSE_FAILED",
+  /**
+   * **我们**给渠道命令传了服务端解不开的参数（终态，但归因指向我们自己）。
+   *
+   * ## ★★★ 为什么必须与 `RESOURCE_FORBIDDEN` 分开
+   *
+   * 实测（用户日志，`im/list_group_member_by_ids`）：
+   * `Decode parameter error: 2` + `server_error_code: 1001`。而 `1001`
+   * 在上游是个被复用的通用 im 码（已知三种含义：保密群 / org not match /
+   * 参数解不开）—— 归成 `RESOURCE_FORBIDDEN` 之后调用方会把它当
+   * "这个群没权限读"**静默跳过**，于是一个我们能自己修的 bug 被永久
+   * 记成对方的权限问题，日志里只看得到"保密群"。
+   *
+   * 两个码的修法在**不同的人**身上：`RESOURCE_FORBIDDEN` 要用户去换客户端
+   * 或放弃那个资源；这个要我们改传参。合并成一个就等于把自己的 bug
+   * 藏进对方的权限墙后面。
+   *
+   * ★ 仍然是终态（`retryable: false`）：同样的参数再传一百次也一样。
+   */
+  "CHANNEL_BAD_PARAMETER",
   // 外部会话与授权：这两个都是**终态**，重试永远好不了
   /** 渠道登录态过期，需要用户重新扫码 */
   "SESSION_EXPIRED",

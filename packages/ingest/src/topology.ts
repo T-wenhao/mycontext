@@ -461,7 +461,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
     dependsOn: [],
     routed: false,
     wiring: "unwired",
-    unwiredReason: "向量检索要远程 embedding（按量付费），本期不默认开启",
+    unwiredReason: "向量检索要远程 embedding（按量付费），目前没有接线",
     purpose: "向量索引：让语义检索能命中",
   },
   {
