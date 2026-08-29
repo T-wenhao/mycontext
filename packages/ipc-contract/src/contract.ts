@@ -4057,6 +4057,40 @@ export const runtimeConfigSecretFieldSchema = z.object({
 })
 
 /**
+ * 数值字段的展示形态。目前只有 embedding 维度用它。
+ *
+ * ★ 为什么不复用 `runtimeConfigFieldSchema`（自由串）：维度对不上会在向量库
+ * upsert 时**崩**，不是降级。让它在 contract 这一层就是 `number`，比在 UI 里
+ * 靠 `parseInt` 兜一层更早发现错值。
+ */
+export const runtimeConfigNumberFieldSchema = z.object({
+  value: z.number(),
+  source: z.enum(["user", "env", "dotenv", "default"]),
+})
+
+/** 布尔字段的展示形态。目前只有「是否发 dimensions 参数」用它。 */
+export const runtimeConfigBoolFieldSchema = z.object({
+  value: z.boolean(),
+  source: z.enum(["user", "env", "dotenv", "default"]),
+})
+
+/**
+ * embedding 三项的**内置默认**（用户没配时用这个）。
+ *
+ * ★ 这三个值原先写死在 `startup.ts` 的 gateway getter 里。提到这里是因为
+ * UI 要把它们当 placeholder 显示（「你不填就是这个」比一句「留空则默认」直接），
+ * 而 service 层要拿它们做回退 —— 两边必须是**同一个**常量，否则某天改了一处
+ * 界面上写的默认值就与实际生效值不符。
+ *
+ * `DEFAULT_EMBEDDING_DIM` = 2048 + `sendDimensions` = true 是照 DashScope
+ * `text-embedding-v4` 的 matryoshka 口径定的（它默认返 1024，而 kl 默认建
+ * 4096 维集合，两边都不匹配 → 显式截断到 2048）。换别家 embedding 服务时
+ * **必须实测返回维度**再改这两项，否则向量库 upsert 会崩。
+ */
+export const DEFAULT_EMBEDDING_DIM = 2048
+export const DEFAULT_EMBED_SEND_DIMENSIONS = true
+
+/**
  * 模型网关配置视图。
  *
  * 主配置（`llm*` / `modelMain` / `embedModel`）+ KL 专用三项。
@@ -4085,6 +4119,36 @@ export const runtimeConfigViewSchema = z.object({
    * 所以 `source` 与其它字段同一套来源标记。
    */
   klProvider: runtimeConfigProviderFieldSchema,
+  /**
+   * embedding 专用地址。**留空 = 沿用 KL 地址**（`klEffective.baseUrl` 归一化到
+   * 恰好一个 `/v1`），也就是改动前的唯一行为。
+   *
+   * ★ 为什么需要它独立：有的网关只给 chat 不给 embedding（实测遇到过 —— 一个
+   * OpenAI 兼容口 `/models` 里 12 个模型全是 chat/image/audio，`/embeddings`
+   * 对任何模型名都回 `Model not exist.`）。那种网关上 LLM 能用、建图必卡在
+   * 算向量这一步，而在此之前 embedding 地址是从 KL 地址**推导**的，
+   * 配置层根本没有入口把它指到别处。
+   */
+  embedBaseUrl: runtimeConfigFieldSchema,
+  /**
+   * embedding 专用密钥。**留空 = 沿用 KL 那把**（改动前的唯一行为）。
+   *
+   * ★ 为什么它必须跟着 `embedBaseUrl` 一起存在：地址一旦指到别的 host，
+   * KL 那把 key 对新 host 几乎必然是 401 —— 「地址能配而密钥不能」等于
+   * 这个功能只在"新 host 恰好不校验密钥"时才成立，那是个很窄的巧合。
+   * 而 401 在建图链路上的表现是每个 embedding 批次报错重试，不是当场弹窗。
+   */
+  embedApiKey: runtimeConfigSecretFieldSchema,
+  /** embedding 维度。必须与所用模型**实际返回**的宽度一致，否则向量库 upsert 崩。 */
+  embeddingDim: runtimeConfigNumberFieldSchema,
+  /**
+   * 是否在 embedding 请求里显式带 `dimensions` 参数（matryoshka 截断）。
+   *
+   * ★ 不是所有服务都接受这个字段 —— vLLM 会直接拒掉带 `dimensions` 的请求
+   * （kl 的 `KL_EMBED_SEND_DIMENSIONS` 注释写着这件事）。所以自建 embedding
+   * 服务要关掉它，DashScope 那类要开。
+   */
+  embedSendDimensions: runtimeConfigBoolFieldSchema,
   /** KL 回退解析后**实际生效**的三项（明文 base/model，key 只给 configured） */
   klEffective: z.object({
     baseUrl: z.string(),
@@ -4092,6 +4156,12 @@ export const runtimeConfigViewSchema = z.object({
     apiKeyConfigured: z.boolean(),
     /** 实际生效的协议（默认层 ?? 用户覆盖） */
     provider: modelProviderSchema,
+    /**
+     * embedding 那一路**实际会用**的地址（已解析「留空→沿用 KL 地址」并归一化
+     * `/v1`）。UI 用它显示「当前实际打到哪」—— 与 `baseUrl` 同一个理由：
+     * 留空回退的字段必须让人看得见回退到了什么。
+     */
+    embedBaseUrl: z.string(),
   }),
 })
 
@@ -4117,6 +4187,19 @@ export const saveRuntimeConfigInputSchema = z.object({
   klModelMain: z.string().max(200).optional(),
   /** 知识库协议。undefined = 不改；两个枚举值之一 = 覆盖 */
   klProvider: modelProviderSchema.optional(),
+  /** embedding 专用地址。空串 = 清空（回退沿用 KL 地址）。 */
+  embedBaseUrl: z.string().max(2000).optional(),
+  /** embedding 专用密钥。三态同其它 key：undefined 不改、null/"" 清空（回退沿用 KL 那把）。 */
+  embedApiKey: z.string().max(500).nullable().optional(),
+  /**
+   * embedding 维度。`null` = 清空（回退内置默认 `DEFAULT_EMBEDDING_DIM`）。
+   *
+   * ★ 上界 8192 不是随手写的：常见 embedding 模型最宽到 4096（Qwen3-Embedding-8B），
+   * 留一倍余量。下界 1 让"填了个 0"当场被 schema 拒掉，而不是带着 0 维去建集合。
+   */
+  embeddingDim: z.number().int().min(1).max(8192).nullable().optional(),
+  /** 是否显式发 `dimensions` 参数。`null` = 清空（回退内置默认）。 */
+  embedSendDimensions: z.boolean().nullable().optional(),
 })
 
 export type SaveRuntimeConfigInput = z.infer<typeof saveRuntimeConfigInputSchema>

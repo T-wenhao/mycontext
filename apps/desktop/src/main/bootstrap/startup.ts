@@ -227,21 +227,12 @@ export function autoBuildAllowed(base: string, key: string, identityBound: boole
 /**
  * embedding 网关 base 规整成 OpenAI 兼容形态：**恰好以一个 `/v1` 结尾**。
  *
- * litellm 把 base 原样交给 OpenAI SDK，SDK 视其为 API 根并拼 `/embeddings`；
- * SDK 自己的默认根是 `https://api.openai.com/v1` —— `/v1` 属于根本身。
- * DashScope 只提供 `…/compatible-mode/v1/embeddings`，所以：
- * - 缺 `/v1` → 404（litellm.NotFoundError: OpenAIException - Error code: 404）
- * - 用户配的 URL 已带 `/v1` 而这里再拼一个 → `/v1/v1` 同样 404（实测事故）
- *
- * 于是把结尾任意个 `/v1` 收敛成一个，缺则补一个。与 kl 侧
- * `kl_graph/utils/litellm_config.py` 的 `openai_base_url` 同口径
- * （kl 侧对一切入口做防御性兜底，这里是源头修正）。
+ * ★ 实现已移到 `runtime-config.service.ts`（`resolved()` 要用它算
+ * `embedBaseUrl` 的回退，而本模块 import 那个 service —— 留在这里会成环）。
+ * 这里只做 re-export，因为 `openAiEmbedBaseUrl` 的既有单测和调用方都指着
+ * 这个路径。
  */
-export function openAiEmbedBaseUrl(base: string): string {
-  const trimmed = base.trim().replace(/\/+$/, "")
-  if (trimmed === "") return ""
-  return `${trimmed.replace(/(\/v1)+$/, "")}/v1`
-}
+export { openAiEmbedBaseUrl } from "../services/runtime-config.service.js"
 
 export function bootstrapApp(mainDir: string): AppContext {
   const packaged = app.isPackaged
@@ -1301,16 +1292,26 @@ export function bootstrapApp(mainDir: string): AppContext {
         // ★ kl 抽取模型：默认回退主模型（glm-5.2）。想给 kl 单独指一个模型就在设置里
         // 填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
         llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-        // ★ embedding 走 OpenAI 兼容：base 要带恰好一个 /v1（litellm 直接 POST
-        // {base}/embeddings；用户配好带 /v1 的 URL 时不能再拼，否则 /v1/v1 → 404）。
-        embedBaseUrl: openAiEmbedBaseUrl(base),
+        // ★ embedding 走 OpenAI 兼容，地址与维度现在都**可在设置里单独配**
+        // （`resolved()` 已解析「留空→沿用 KL 地址」并把 `/v1` 归一化）。
+        //
+        // 为什么要独立：有的网关只给 chat 不给 embedding —— 实测遇到过一个
+        // OpenAI 兼容口，`/models` 返回的 12 个模型全是 chat/image/audio，
+        // `/embeddings` 对任何模型名都回 `Model not exist.`。那种网关上 LLM
+        // 能用而建图必卡在算向量，此前配置层没有入口把 embedding 指到别处。
+        embedBaseUrl: r.embedBaseUrl,
         embedModel: r.embedModel,
         apiKey: key,
-        // ★ 网关（DashScope 兼容）的 text-embedding-v4 默认返回 1024 维，而 kl 默认
-        // 建 4096 维集合 —— 维度对不上会在 Qdrant upsert 时崩。配 2048 + 带 dimensions
-        // 参数（matryoshka 截断），与 kl 侧实跑验证过的口径一致。
-        embeddingDim: 2048,
-        sendDimensions: true,
+        // ★ embedding 那把（已解析「留空→沿用 KL 那把」）。地址指到另一个 host 时
+        // 两把 key 必然不同 —— 少了这一项那个 host 会一路 401。
+        embedApiKey: r.embedApiKey,
+        // ★ 维度必须与所用模型**实际返回**的宽度一致，否则向量库 upsert 会崩。
+        // 默认仍是 2048 + 带 dimensions（DashScope `text-embedding-v4` 的
+        // matryoshka 口径：它默认返 1024，kl 默认建 4096 维集合，两边都不匹配）。
+        // 换别家 embedding 服务时在设置里改这两项 —— 自建 vLLM 要关掉
+        // sendDimensions（它拒收带 `dimensions` 的请求）。
+        embeddingDim: r.embeddingDim,
+        sendDimensions: r.embedSendDimensions,
       }
     },
     /**
@@ -1409,11 +1410,13 @@ export function bootstrapApp(mainDir: string): AppContext {
       // ★ 协议与主 gateway() 同源（改一处两边都变）：默认 openai，修那个 404 报错。
       llmProvider: r.klProvider,
       llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-      embedBaseUrl: openAiEmbedBaseUrl(base),
+      // ★ 与上面主 gateway() 同源：embedding 四项都取已解析值（可在设置里单独配）。
+      embedBaseUrl: r.embedBaseUrl,
       embedModel: r.embedModel,
       apiKey: key,
-      embeddingDim: 2048,
-      sendDimensions: true,
+      embedApiKey: r.embedApiKey,
+      embeddingDim: r.embeddingDim,
+      sendDimensions: r.embedSendDimensions,
     }
   }
 

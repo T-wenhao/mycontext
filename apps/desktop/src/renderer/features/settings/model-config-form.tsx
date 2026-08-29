@@ -48,12 +48,13 @@
  * 再挂一层就是同一件事说三四遍 —— 标题的责任留给容器。
  */
 import { useState } from "react"
-import { Button, Disclosure, Field, Input, Tag, cn } from "@mycontext/design"
-import type {
-  ModelProvider,
-  RuntimeConfigProbe,
-  RuntimeConfigView,
-  SaveRuntimeConfigInput,
+import { Button, Disclosure, Field, Input, Switch, Tag, cn } from "@mycontext/design"
+import {
+  DEFAULT_EMBEDDING_DIM,
+  type ModelProvider,
+  type RuntimeConfigProbe,
+  type RuntimeConfigView,
+  type SaveRuntimeConfigInput,
 } from "@mycontext/ipc-contract"
 import { useProbeRuntimeConfig, useRuntimeConfig, useSaveRuntimeConfig } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
@@ -95,6 +96,18 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [klApiKey, setKlApiKey] = useState("")
   /** 知识库协议草稿。null = 未编辑（用探测识别值或已存值）。 */
   const [klProvider, setKlProvider] = useState<ModelProvider | null>(null)
+  /**
+   * embedding 三项草稿。null = 未编辑。
+   *
+   * ★ 维度用**字符串**草稿而不是 number：输入框中间态（清空成 ""、正在敲 "20"）
+   * 用 number 表达不了 —— 拿 `parseInt` 边敲边转会把 "" 变成 NaN、把 "20" 提交成
+   * 一个用户还没敲完的值。所以草稿存原文，提交时才转（转不出整数就当"不改"）。
+   */
+  const [embedBaseUrl, setEmbedBaseUrl] = useState<string | null>(null)
+  /** embedding 专用密钥草稿。空串 = **不改**（与其它两把 key 同语义，UI 不回显）。 */
+  const [embedApiKey, setEmbedApiKey] = useState("")
+  const [embedDimText, setEmbedDimText] = useState<string | null>(null)
+  const [embedSendDims, setEmbedSendDims] = useState<boolean | null>(null)
   /** 模型名手输模式（探测列表里没有想要的那个时） */
   const [customModel, setCustomModel] = useState(false)
   /**
@@ -127,6 +140,10 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     modelMain !== null ||
     mainProvider !== null ||
     embedModel !== null ||
+    embedBaseUrl !== null ||
+    embedApiKey !== "" ||
+    embedDimText !== null ||
+    embedSendDims !== null ||
     klBaseUrl !== null ||
     klModel !== null ||
     klProvider !== null ||
@@ -139,6 +156,22 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     if (modelMain !== null) patch.modelMain = modelMain
     if (mainProvider !== null) patch.mainProvider = mainProvider
     if (embedModel !== null) patch.embedModel = embedModel
+    if (embedBaseUrl !== null) patch.embedBaseUrl = embedBaseUrl
+    // 空串 = 不改（与另外两把 key 同语义：UI 不回显旧值，"没填"必须与"清空"可区分）
+    if (embedApiKey !== "") patch.embedApiKey = embedApiKey
+    /**
+     * 维度：空串 = 清空（回退内置默认）→ 传 `null`；否则转整数。
+     * 转不出整数（用户敲了非数字）就**不提交这一项** —— 静默丢掉一个坏值比
+     * 存进去一个 NaN 好，而 `type=number` + min/max 已经在输入侧拦了大部分。
+     */
+    if (embedDimText !== null) {
+      if (embedDimText.trim() === "") patch.embeddingDim = null
+      else {
+        const parsed = Number.parseInt(embedDimText, 10)
+        if (Number.isInteger(parsed) && parsed > 0) patch.embeddingDim = parsed
+      }
+    }
+    if (embedSendDims !== null) patch.embedSendDimensions = embedSendDims
     // 空串 = 不改（UI 不回显旧 key）
     if (apiKey !== "") patch.llmApiKey = apiKey
     if (klBaseUrl !== null) patch.klLlmBaseUrl = klBaseUrl
@@ -154,6 +187,10 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
         setModelMain(null)
         setMainProvider(null)
         setEmbedModel(null)
+        setEmbedBaseUrl(null)
+        setEmbedApiKey("")
+        setEmbedDimText(null)
+        setEmbedSendDims(null)
         setKlBaseUrl(null)
         setKlModel(null)
         setKlProvider(null)
@@ -379,8 +416,98 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
             value={embedValue}
             onPick={(next) => setEmbedModel(next)}
           />
+          {/*
+            ★ 探测成功、拿到了真实列表、而列表里**一个 embedding 模型都没有** → 明说。
+            实测遇到过这种网关：`/models` 12 个模型全是 chat/image/audio，
+            `/embeddings` 对任何模型名都回 `Model not exist.`。那种网关上 LLM 能用、
+            建图必卡在算向量这一步，而在此之前界面上完全看不出来 —— 用户只会
+            看到"建图很慢"然后一直失败。既然刚探到了列表，就当场把它说出来，
+            并指向下面那个折叠区（embedding 可以单独指到别的服务）。
+          */}
+          {result?.ok === true && result.models.length > 0 && embedOptions.length === 0 && (
+            <span className="typography-caption-400 text-[var(--status-warning)]">
+              {t("model.embed.noneOnGateway")}
+            </span>
+          )}
         </div>
       </section>
+
+      {/*
+        embedding 专用网关。折叠，因为绝大多数人不需要动它 ——
+        · `hint` 说「留空 = 用知识库那个地址」；
+        · `summary` 给**实际生效**的地址 + 维度（收起时也看得见）。
+      */}
+      <Disclosure
+        title={t("model.embed.title")}
+        hint={t("model.embed.hint")}
+        summary={`${current.klEffective.embedBaseUrl || "—"} · ${current.embeddingDim.value}`}
+      >
+        <div className="flex flex-col gap-[var(--gap-section-sm)]">
+          <Field label={t("model.embed.baseUrl")} description={t("model.embed.baseUrlHint")}>
+            {(attributes) => (
+              <Input
+                {...attributes}
+                value={embedBaseUrl ?? current.embedBaseUrl.value}
+                onChange={(event) => setEmbedBaseUrl(event.target.value)}
+                // placeholder 就是留空会回退到的那个值（KL 地址归一化后的形态）
+                placeholder={current.klEffective.embedBaseUrl || "https://…/v1"}
+              />
+            )}
+          </Field>
+
+          {/*
+            ★ 密钥必须跟着地址一起可配：地址指到别的 host 时，主/KL 那把 key
+            对新 host 基本必然 401，而那个 401 只表现为建图时 embedding 批次
+            反复重试退避 —— 界面上无声。Tag 的「跟随知识库」表示当前在回退。
+          */}
+          <div className="flex flex-col gap-[var(--gap-component-sm)]">
+            <div className="flex items-center gap-2">
+              <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+                {t("model.provider.apiKey")}
+              </span>
+              <KeyTag
+                field={current.embedApiKey}
+                fallbackLabel={t("model.embed.inherited")}
+                inheritedLabel={t("model.embed.inherited")}
+              />
+            </div>
+            <Input
+              type="password"
+              aria-label={t("model.embed.apiKey")}
+              value={embedApiKey}
+              onChange={(event) => setEmbedApiKey(event.target.value)}
+              placeholder={t("model.provider.apiKeyPlaceholder")}
+            />
+          </div>
+
+          <Field label={t("model.embed.dim")} description={t("model.embed.dimHint")}>
+            {(attributes) => (
+              <Input
+                {...attributes}
+                type="number"
+                min={1}
+                max={8192}
+                value={embedDimText ?? String(current.embeddingDim.value)}
+                onChange={(event) => setEmbedDimText(event.target.value)}
+                placeholder={String(DEFAULT_EMBEDDING_DIM)}
+              />
+            )}
+          </Field>
+
+          {/* 开关自带可见 label；说明另起一行（`title` 只在悬停时出现，不能当唯一载体）。 */}
+          <div className="flex flex-col gap-[var(--gap-component-sm)]">
+            <Switch
+              checked={embedSendDims ?? current.embedSendDimensions.value}
+              onChange={setEmbedSendDims}
+              ariaLabel={t("model.embed.sendDimensions")}
+              label={t("model.embed.sendDimensions")}
+            />
+            <span className="typography-caption-400 text-[var(--text-base-secondary)]">
+              {t("model.embed.sendDimensionsHint")}
+            </span>
+          </div>
+        </div>
+      </Disclosure>
 
       {/*
         KL 专用网关。
@@ -487,12 +614,31 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
 function KeyTag({
   field,
   fallbackLabel,
+  inheritedLabel,
 }: {
   field: RuntimeConfigView["llmApiKey"]
   fallbackLabel?: string
+  /**
+   * 「这一项自己没填，用的是回退来的那把」时显示的文案。
+   *
+   * ★ 为什么需要它：embedding 那把的 `configured` 报的是**回退解析后**
+   * 有没有 key 可用（见 service 里 `embedApiKey` 那段）。只按 configured
+   * 分两态的话，"跟随知识库那把"会显示成"已配置" —— 那是**假反馈**：
+   * 用户会以为自己给 embedding 单独配过一把。给了这个 label 就三态：
+   * 自己填了（后 4 位）/ 跟随（这个 label）/ 一把都没有（未配置）。
+   */
+  inheritedLabel?: string
 }) {
   const { t } = useDynamicTranslation("settings")
   if (field.configured) {
+    // 自己没填但有回退来的那把 —— 说"跟随"，不说"已配置"
+    if (inheritedLabel !== undefined && field.source !== "user") {
+      return (
+        <Tag size="sm" status="default">
+          {inheritedLabel}
+        </Tag>
+      )
+    }
     return (
       <Tag size="sm" status="success" showIndicator>
         {field.tail === null ? t("model.keyOn") : t("model.keyTail", { tail: field.tail })}

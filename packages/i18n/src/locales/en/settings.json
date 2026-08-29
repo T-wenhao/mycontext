@@ -427,6 +427,19 @@
       "unsupported": "Testing didn't confirm this gateway supports the selected protocol — you can still save, but make sure the gateway actually supports it.",
       "mainProtocolHint": "Which protocol the main model (digital-twin replies, search, distillation, direct calls) uses to reach the gateway. Auto-detected after testing; overridable."
     },
+    "embed": {
+      "title": "Use a separate endpoint for embeddings",
+      "hint": "Leave empty to reuse the knowledge-base endpoint. Some gateways serve chat models only and no embedding models — point embeddings elsewhere here.",
+      "baseUrl": "Embeddings endpoint",
+      "baseUrlHint": "OpenAI-compatible /embeddings address. A trailing /v1 is optional — it is normalized to exactly one.",
+      "apiKey": "Embeddings API key",
+      "inherited": "Same as knowledge base",
+      "dim": "Embedding dimension",
+      "dimHint": "Must match the width the model actually returns — a wrong value crashes the vector store on write rather than merely slowing things down. Verify against a real response after switching models.",
+      "sendDimensions": "Send the dimensions parameter",
+      "sendDimensionsHint": "Truncate to the dimension above (matryoshka). Self-hosted embedding servers such as vLLM usually reject this parameter — turn it off for those.",
+      "noneOnGateway": "This gateway has no embedding model — graph building will stall at the vectorize step. Point embeddings at a service that provides them under \"Use a separate endpoint for embeddings\" below."
+    },
     "kl": {
       "title": "Use a different model for the knowledge base",
       "hint": "Leave blank to reuse the main settings above. Fill these in only to point the knowledge base at its own gateway or model.",

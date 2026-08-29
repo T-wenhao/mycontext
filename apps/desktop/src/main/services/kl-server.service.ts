@@ -349,6 +349,14 @@ export interface KlGatewayConfig {
   /** 出网密钥（embedding + LLM 共用网关时同一个）。 */
   apiKey?: string
   /**
+   * embedding 专用出网密钥。**不给就用 `apiKey`**（同一网关的同一把）。
+   *
+   * ★ 只有 `embedBaseUrl` 指到**另一个 host** 时才需要它 —— 那种情况下
+   * `apiKey`（LLM 那把）对新 host 基本必然 401，而这个 401 的表现是建图时
+   * embedding 批次反复重试退避，不是当场报错。
+   */
+  embedApiKey?: string
+  /**
    * embedding 维度。**必须与网关实际返回的维度一致** —— kl 的 Qdrant 集合按
    * 这个数建，向量维度对不上会在 upsert 时崩（实测网关 text-embedding-v4 默认
    * 返回 1024，而 kl 默认建 4096 集合 → shape mismatch）。走 DashScope 兼容
@@ -662,6 +670,15 @@ export class KlServerService {
       gw.embedBaseUrl ?? "",
       gw.embedModel ?? "",
       (gw.apiKey ?? "").length === 0 ? "nokey" : `key:${String((gw.apiKey ?? "").length)}`,
+      /**
+       * ★ embedding 那把也要进指纹 —— 否则「只改 embedding 密钥」这一次改动
+       * 算不出变化，kl 不重起，于是它继续用旧 key 出网。表现是用户换了 key
+       * 却依然 401，而设置页显示保存成功（本文件顶部那段"改网关要重起 kl"
+       * 描述的正是这类静默失败）。同样只记长度，不记明文。
+       */
+      (gw.embedApiKey ?? "").length === 0
+        ? "noembedkey"
+        : `embedkey:${String((gw.embedApiKey ?? "").length)}`,
       String(gw.embeddingDim ?? ""),
       gw.sendDimensions === true ? "dim1" : "dim0",
     ].join("|")
@@ -2709,17 +2726,34 @@ export class KlServerService {
        *
        * ★ 这就是"改默认协议为 openai 后 kl 恒报 Missing credentials / OPENAI_API_KEY"
        * 那个刷屏的根因：以前默认 anthropic 时 key 走 ANTHROPIC_AUTH_TOKEN（process.env
-       * 里 seed 过），翻成 openai 后没人塞 OPENAI_API_KEY。所以这里按协议把**同一把
-       * 出网 key**塞到对应的名下 —— embedding 那把与 LLM 那把是同一个网关的同一把。
+       * 里 seed 过），翻成 openai 后没人塞 OPENAI_API_KEY。所以这里按协议把出网 key
+       * 塞到对应的名下。
+       *
+       * ★★ embedding 那把与 LLM 那把**不再假定是同一个** —— embedding 地址现在
+       * 可以指到另一个 host（设置里可配），那种情况下两把 key 必然不同。
+       * `embedApiKey` 缺省时回落到 `apiKey`，所以同网关的老配置行为不变。
        */
+      const embedKey =
+        gw.embedApiKey !== undefined && gw.embedApiKey !== "" ? gw.embedApiKey : gw.apiKey
+      if (embedKey !== undefined && embedKey !== "") env["KL_EMBED_API_KEY"] = embedKey
       if (gw.apiKey !== undefined && gw.apiKey !== "") {
-        env["KL_EMBED_API_KEY"] = gw.apiKey
         if (gw.llmProvider === "anthropic") env["ANTHROPIC_AUTH_TOKEN"] = gw.apiKey
         else env["OPENAI_API_KEY"] = gw.apiKey
       }
       // ★ 维度必须与网关实际返回一致，否则 Qdrant 集合维度对不上会崩（见字段注释）。
       if (gw.embeddingDim !== undefined) env["KL_EMBEDDING_DIM"] = String(gw.embeddingDim)
-      if (gw.sendDimensions === true) env["KL_EMBED_SEND_DIMENSIONS"] = "1"
+      /**
+       * ★ 显式写 "0" 而不是「false 就不设」。
+       *
+       * 本函数的 env 基底是拷来的 `process.env`（见上面那段注释），里面**可能已经有**
+       * 一个 `KL_EMBED_SEND_DIMENSIONS=1`（开发者 `.env`、或早先 seed 进去的）。
+       * 「false 时不设」会让那个继承来的 1 活下来，于是用户在设置里关掉这一项
+       * 却依然发 `dimensions` —— 自建 vLLM 会因此拒掉每一个 embedding 请求，
+       * 而界面上这一项明明显示"已关"。这正是本仓库最怕的那种静默不一致：
+       * 用户的选择被一个看不见的继承值盖掉。所以两个方向都显式落地。
+       */
+      if (gw.sendDimensions !== undefined)
+        env["KL_EMBED_SEND_DIMENSIONS"] = gw.sendDimensions ? "1" : "0"
     }
     return env
   }

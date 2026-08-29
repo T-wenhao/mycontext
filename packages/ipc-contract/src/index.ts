@@ -137,6 +137,12 @@ export {
   runtimeConfigProbeSchema,
   modelProviderSchema,
   runtimeConfigProviderFieldSchema,
+  runtimeConfigNumberFieldSchema,
+  runtimeConfigBoolFieldSchema,
+  // embedding 三项的内置默认 —— service 拿它做回退、UI 拿它当 placeholder，
+  // 必须是同一个常量（否则界面上写的默认值会与实际生效值不符）。
+  DEFAULT_EMBEDDING_DIM,
+  DEFAULT_EMBED_SEND_DIMENSIONS,
 } from "./contract.js"
 
 export type {

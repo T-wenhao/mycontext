@@ -24,13 +24,37 @@
  * 一行消费点都不用改。见 `seedProcessEnv` 的注释。
  */
 import type { LoadedConfig, Logger } from "@mycontext/kernel"
-import type {
-  ModelProvider,
-  RuntimeConfigView,
-  RuntimeConfigApply,
-  RuntimeConfigProbe,
+import {
+  DEFAULT_EMBEDDING_DIM,
+  DEFAULT_EMBED_SEND_DIMENSIONS,
+  type ModelProvider,
+  type RuntimeConfigView,
+  type RuntimeConfigApply,
+  type RuntimeConfigProbe,
 } from "@mycontext/ipc-contract"
 import type { SettingsRepository } from "@mycontext/store"
+
+/**
+ * embedding 网关 base 规整成 OpenAI 兼容形态：**恰好以一个 `/v1` 结尾**。
+ *
+ * litellm 把 base 原样交给 OpenAI SDK，SDK 视其为 API 根并拼 `/embeddings`；
+ * SDK 自己的默认根是 `https://api.openai.com/v1` —— `/v1` 属于根本身。
+ * DashScope 只提供 `…/compatible-mode/v1/embeddings`，所以：
+ * - 缺 `/v1` → 404（litellm.NotFoundError: OpenAIException - Error code: 404）
+ * - 用户配的 URL 已带 `/v1` 而这里再拼一个 → `/v1/v1` 同样 404（实测事故）
+ *
+ * 于是把结尾任意个 `/v1` 收敛成一个，缺则补一个。与 kl 侧
+ * `kl_graph/utils/litellm_config.py` 的 `openai_base_url` 同口径
+ * （kl 侧对一切入口做防御性兜底，这里是源头修正）。
+ *
+ * ★ 归一化对**用户单独填的 embedding 地址**同样适用 —— 用户手填时同样会
+ * 带不带 `/v1` 都有，这个坑不因为字段换了来源就消失。
+ */
+export function openAiEmbedBaseUrl(base: string): string {
+  const trimmed = base.trim().replace(/\/+$/, "")
+  if (trimmed === "") return ""
+  return `${trimmed.replace(/(\/v1)+$/, "")}/v1`
+}
 
 /** 落库的非敏感覆盖项（apiKey 走 keychain，不在这里）。 */
 interface StoredOverrides {
@@ -39,6 +63,18 @@ interface StoredOverrides {
   /** 主模型协议覆盖。缺省 = 走默认层（kernel 默认 openai）。 */
   mainProvider?: ModelProvider
   embedModel?: string
+  /**
+   * embedding 专用地址覆盖。缺省 = 沿用 KL 地址（改动前的唯一行为）。
+   *
+   * ★ 这三项（base/dim/sendDimensions）**故意不进 kernel 的 `MYCONTEXT_*` 默认层** ——
+   * 它们只在 UI 里配。理由：默认层那套（内置 < .env < 真实 env）的价值是"开发者
+   * 零 UI 能跑"，而这三项的正确值**取决于用户接的是哪个 embedding 服务**，
+   * 没有一个"对所有人都对"的 env 默认可言。留空时回退到 contract 里的内置常量，
+   * 与改动前写死的行为逐字一致。
+   */
+  embedBaseUrl?: string
+  embeddingDim?: number
+  embedSendDimensions?: boolean
   klLlmBaseUrl?: string
   klModelMain?: string
   /** 知识库协议覆盖。缺省 = 走默认层（kernel 默认 openai）。 */
@@ -59,6 +95,24 @@ export interface ResolvedRuntimeConfig {
   klModel: string
   /** KL 抽取协议（默认层 ?? 用户覆盖）。传给 kl 的 `KL_LLM_PROVIDER`。 */
   klProvider: ModelProvider
+  /**
+   * embedding 那一路**实际会用**的地址，已归一化到恰好一个 `/v1`。
+   *
+   * 解析顺序：用户单独填的（非空）→ 沿用 `klBaseUrl`。后者是改动前的唯一行为，
+   * 所以没配过这一项的老用户拿到的值与改动前逐字一致。
+   */
+  embedBaseUrl: string
+  /**
+   * embedding 那一路**实际会用**的密钥（用户单独填的 ?? 沿用 KL 那把）。
+   *
+   * ★ 与 `embedBaseUrl` 必须成对回退：地址指到别的 host 而 key 还是 KL 那把
+   * 基本必然 401，而那个 401 只会表现为建图时 embedding 批次反复重试。
+   */
+  embedApiKey: string
+  /** embedding 维度（用户配的 ?? 内置默认 2048）。传给 kl 的 `KL_EMBEDDING_DIM`。 */
+  embeddingDim: number
+  /** 是否显式发 `dimensions`（用户配的 ?? 内置默认 true）。 */
+  embedSendDimensions: boolean
 }
 
 /** 保存输入：字符串三态见 contract 的 saveRuntimeConfigInputSchema。 */
@@ -74,6 +128,14 @@ export interface SaveRuntimeConfigPatch {
   klModelMain?: string | undefined
   /** 知识库协议。undefined = 不改。 */
   klProvider?: ModelProvider | undefined
+  /** embedding 专用地址。空串 = 清空（回退沿用 KL 地址）。 */
+  embedBaseUrl?: string | undefined
+  /** embedding 专用密钥。undefined = 不改，null/"" = 清空（回退沿用 KL 那把）。 */
+  embedApiKey?: string | null | undefined
+  /** embedding 维度。null = 清空（回退内置默认）。 */
+  embeddingDim?: number | null | undefined
+  /** 是否显式发 `dimensions`。null = 清空（回退内置默认）。 */
+  embedSendDimensions?: boolean | null | undefined
 }
 
 export interface RuntimeConfigServiceOptions {
@@ -94,6 +156,13 @@ export interface RuntimeConfigServiceOptions {
 const SETTING_KEY = "runtime_llm_config"
 const LLM_API_KEY_SECRET = "runtime_llm_api_key"
 const KL_API_KEY_SECRET = "runtime_kl_api_key"
+/**
+ * embedding 专用密钥的 keychain 槽位。
+ *
+ * ★ 它**不在** `StoredOverrides` 里 —— 密钥一律走 keychain，落库那份只放
+ * 非敏感覆盖项（与 `llmApiKey`/`klLlmApiKey` 同一条规矩）。
+ */
+const EMBED_API_KEY_SECRET = "runtime_embed_api_key"
 
 /** 旧的隐藏高级面板存储位（首次运行 adopt 用）。 */
 const LEGACY_ADVANCED_KEY = "advanced_ai_config"
@@ -140,16 +209,37 @@ export class RuntimeConfigService {
      */
     const klProvider: ModelProvider = stored.klProvider ?? d.klProvider
 
+    const klBaseUrl = klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl
+    /**
+     * ★ embedding 地址：用户单独填的优先，否则沿用 KL 地址 —— 后者是改动前
+     * 那句 `openAiEmbedBaseUrl(base)` 的原样保留，所以没动过这一项的用户
+     * 完全感知不到这次改动。两条分支都过归一化（用户手填也会带不带 `/v1`）。
+     */
+    const embedBaseRaw = stored.embedBaseUrl?.trim() ?? ""
+    const embedBaseUrl = openAiEmbedBaseUrl(embedBaseRaw !== "" ? embedBaseRaw : klBaseUrl)
+    /**
+     * ★ embedding 密钥与地址**同构回退**：用户单独填的优先，否则沿用 KL 那把
+     * （改动前的唯一行为）。两者各自独立回退是刻意的 —— 有人会"换 host 但
+     * 复用同一把 key"（同一家的另一个域名），也有人"同 host 不同 key"。
+     * 绑成一体的话其中一种就表达不出来。
+     */
+    const klApiKey = klApiRaw.trim() !== "" ? klApiRaw : llmApiKey
+    const embedKeyRaw = this.options.secretStore.read(EMBED_API_KEY_SECRET) ?? ""
+
     return {
       llmBaseUrl,
       llmApiKey,
       modelMain,
       mainProvider,
       embedModel,
-      klBaseUrl: klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl,
-      klApiKey: klApiRaw.trim() !== "" ? klApiRaw : llmApiKey,
+      klBaseUrl,
+      klApiKey,
       klModel: klModelRaw.trim() !== "" ? klModelRaw : modelMain,
       klProvider,
+      embedBaseUrl,
+      embedApiKey: embedKeyRaw.trim() !== "" ? embedKeyRaw : klApiKey,
+      embeddingDim: stored.embeddingDim ?? DEFAULT_EMBEDDING_DIM,
+      embedSendDimensions: stored.embedSendDimensions ?? DEFAULT_EMBED_SEND_DIMENSIONS,
     }
   }
 
@@ -206,11 +296,54 @@ export class RuntimeConfigService {
         // 存了就是用户覆盖，否则来源同其它默认层字段（env/dotenv/default）。
         source: stored.klProvider !== undefined ? "user" : this.defaultSource("klProvider"),
       },
+      /**
+       * ★ embedding 三项**没有默认层**（见 `StoredOverrides` 里那段注释）——
+       * 存了就 `user`，没存就 `default`（内置常量 / 沿用 KL 地址）。
+       * 不走 `plain()`：那个 helper 的回退取 `d.values[key]`，而这三项在
+       * kernel 配置里根本没有对应键。
+       */
+      embedBaseUrl: {
+        value: stored.embedBaseUrl ?? "",
+        source: stored.embedBaseUrl !== undefined ? "user" : "default",
+      },
+      /**
+       * ★ embedding 密钥同样没有默认层：填过就 `user`（给后 4 位），
+       * 没填过就 `default` + `configured` 表示**回退的那把**在不在。
+       *
+       * `configured` 报的是"这一路到底有没有密钥可用"（回退解析后的结果），
+       * 而不是"这个槽位有没有填" —— 后者由 `source` 表达。这样 UI 上
+       * "未配置"就只在**真的一把都没有**时出现，不会在"跟随 KL"时误报。
+       */
+      embedApiKey: (() => {
+        const own = this.options.secretStore.read(EMBED_API_KEY_SECRET)
+        if (own !== null && own !== "") {
+          return {
+            configured: true,
+            tail: own.length >= 4 ? own.slice(-4) : null,
+            source: "user" as FieldSource,
+          }
+        }
+        // 没单独填 → 报回退后那把在不在；不回显它的后 4 位（那是 KL 那把的）
+        return {
+          configured: resolved.embedApiKey !== "",
+          tail: null,
+          source: "default" as FieldSource,
+        }
+      })(),
+      embeddingDim: {
+        value: resolved.embeddingDim,
+        source: stored.embeddingDim !== undefined ? "user" : "default",
+      },
+      embedSendDimensions: {
+        value: resolved.embedSendDimensions,
+        source: stored.embedSendDimensions !== undefined ? "user" : "default",
+      },
       klEffective: {
         baseUrl: resolved.klBaseUrl,
         model: resolved.klModel,
         apiKeyConfigured: resolved.klApiKey !== "",
         provider: resolved.klProvider,
+        embedBaseUrl: resolved.embedBaseUrl,
       },
     }
   }
@@ -222,8 +355,11 @@ export class RuntimeConfigService {
   save(patch: SaveRuntimeConfigPatch, nowIso: string): RuntimeConfigApply {
     const stored = this.readStored()
 
-    // 只作用于**自由串**字段（mainProvider/klProvider 是枚举，单独处理，见下）。
-    type StringKey = Exclude<keyof StoredOverrides, "mainProvider" | "klProvider">
+    // 只作用于**自由串**字段（枚举/数值/布尔单独处理，见下）。
+    type StringKey = Exclude<
+      keyof StoredOverrides,
+      "mainProvider" | "klProvider" | "embeddingDim" | "embedSendDimensions"
+    >
     const merge = (key: StringKey, value: string | undefined): void => {
       if (value === undefined) return
       // 空串 = 清空这一项（回退默认层）；非空 = 覆盖
@@ -233,18 +369,35 @@ export class RuntimeConfigService {
     merge("llmBaseUrl", patch.llmBaseUrl)
     merge("modelMain", patch.modelMain)
     merge("embedModel", patch.embedModel)
+    merge("embedBaseUrl", patch.embedBaseUrl)
     merge("klLlmBaseUrl", patch.klLlmBaseUrl)
     merge("klModelMain", patch.klModelMain)
     // 协议是枚举而非自由串，不走 trim-and-delete 的 merge：undefined = 不改，
     // 给了就覆盖（两个合法值之一，由 contract 的 schema 保证）。
     if (patch.mainProvider !== undefined) stored.mainProvider = patch.mainProvider
     if (patch.klProvider !== undefined) stored.klProvider = patch.klProvider
+    /**
+     * ★ 数值/布尔的三态：`undefined` = 不改，`null` = 清空（回退内置默认），
+     * 值 = 覆盖。**不能**用「假值即清空」那套 —— `embedSendDimensions: false`
+     * 是一个用户真会选的**有效值**（自建 vLLM 要关掉它），把 false 当"没填"
+     * 会让"关掉"这个动作永久存不进去。这就是为什么这两个字段的清空语义
+     * 用显式 `null` 而不是空串/假值。
+     */
+    if (patch.embeddingDim !== undefined) {
+      if (patch.embeddingDim === null) delete stored.embeddingDim
+      else stored.embeddingDim = patch.embeddingDim
+    }
+    if (patch.embedSendDimensions !== undefined) {
+      if (patch.embedSendDimensions === null) delete stored.embedSendDimensions
+      else stored.embedSendDimensions = patch.embedSendDimensions
+    }
 
     this.options.settings.set(SETTING_KEY, JSON.stringify(stored), nowIso)
 
     // apiKey 三态：undefined 不改，null/"" 清空，字符串写入。
     this.writeSecret(LLM_API_KEY_SECRET, patch.llmApiKey)
     this.writeSecret(KL_API_KEY_SECRET, patch.klLlmApiKey)
+    this.writeSecret(EMBED_API_KEY_SECRET, patch.embedApiKey)
 
     this.seedProcessEnv()
 

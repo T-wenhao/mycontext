@@ -425,6 +425,111 @@ describe("KlServerService · 网关出网边界", () => {
     // 不该把 LLM key 误塞成 OPENAI_API_KEY（anthropic 走 ANTHROPIC_AUTH_TOKEN）
     expect(env["OPENAI_API_KEY"]).not.toBe("sk-ant")
   })
+
+  /**
+   * ★★ `sendDimensions:false` 必须**显式**注入 `"0"`，不能"false 就不设"。
+   *
+   * buildEnv 的基底是拷来的 `process.env`，里面可能已经有一个
+   * `KL_EMBED_SEND_DIMENSIONS=1`（开发者 `.env`、或早先 seed 进去的）。
+   * 「false 时不设」会让那个继承来的 1 活下来 —— 用户在设置里关掉这一项，
+   * 实际仍然发 `dimensions`，自建 vLLM 会因此拒掉每个 embedding 请求，
+   * 而界面上这一项明明显示"已关"。这就是本仓库最怕的静默不一致。
+   *
+   * kl 侧读得懂 "0"：`send_dimensions` 是 pydantic `bool`，实测
+   * （vendored python 3.12 / pydantic 2.13.4）`"0" → False`、`"1" → True`。
+   * 注意空串会让 pydantic 抛 ValidationError，所以这里必须是 "0" 而不是 ""。
+   */
+  it("★ sendDimensions=false → 显式注入 KL_EMBED_SEND_DIMENSIONS=0（盖掉继承的 1）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    // 模拟"环境里已经有一个 1"——正是这个值以前会漏过去
+    process.env["KL_EMBED_SEND_DIMENSIONS"] = "1"
+    const runner = fakeRunner()
+    const svc = makeService({
+      runner,
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      gateway: () => ({
+        llmBaseUrl: "https://gw/v1",
+        llmProvider: "openai",
+        llmModel: "glm-5.2",
+        // ★ embedding 指到另一个 host —— 这次改动允许的形态
+        embedBaseUrl: "https://embed.example/v1",
+        embedModel: "Qwen3-Embedding-0.6B",
+        apiKey: "sk-x",
+        embeddingDim: 1024,
+        sendDimensions: false,
+      }),
+    })
+    await svc.ensureReady()
+    const env = runner.getSpec()!.env
+    expect(env["KL_EMBED_SEND_DIMENSIONS"]).toBe("0")
+    expect(env["KL_EMBEDDING_DIM"]).toBe("1024")
+    // embedding 与 LLM 打不同 host：两个 base 各自注入，互不覆盖
+    expect(env["KL_EMBED_BASE_URL"]).toBe("https://embed.example/v1")
+    expect(env["KL_LLM_BASE_URL"]).toBe("https://gw/v1")
+    expect(env["KL_EMBED_MODEL"]).toBe("Qwen3-Embedding-0.6B")
+    delete process.env["KL_EMBED_SEND_DIMENSIONS"]
+  })
+
+  /**
+   * ★★ embedding 与 LLM 各自一把 key。
+   *
+   * embedding 地址指到另一个 host 之后，LLM 那把 key 对新 host 基本必然 401，
+   * 而那个 401 表现为建图时 embedding 批次反复重试退避 —— 界面上无声。
+   * 所以两把 key 必须分别注入到 `KL_EMBED_API_KEY` 与 LLM 侧那个名下。
+   */
+  it("★ embedApiKey 与 apiKey 分别注入（embedding 指到别的 host 时两把 key 不同）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner()
+    const svc = makeService({
+      runner,
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      gateway: () => ({
+        llmBaseUrl: "https://chat-only.example/v1",
+        llmProvider: "openai",
+        llmModel: "glm-5.2",
+        embedBaseUrl: "https://embed.example/v1",
+        embedModel: "Qwen3-Embedding-0.6B",
+        apiKey: "sk-llm",
+        embedApiKey: "sk-embed",
+        embeddingDim: 1024,
+        sendDimensions: false,
+      }),
+    })
+    await svc.ensureReady()
+    const env = runner.getSpec()!.env
+    // embedding 用自己那把
+    expect(env["KL_EMBED_API_KEY"]).toBe("sk-embed")
+    // LLM 那把不受影响（openai 协议 → OPENAI_API_KEY）
+    expect(env["OPENAI_API_KEY"]).toBe("sk-llm")
+    // 绝不能把 LLM 那把当成 embedding 的
+    expect(env["KL_EMBED_API_KEY"]).not.toBe("sk-llm")
+  })
+
+  it("不给 embedApiKey → 回落到 apiKey（同网关的老配置行为不变）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner()
+    const svc = makeService({
+      runner,
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      gateway: () => ({
+        llmBaseUrl: "https://gw/v1",
+        llmProvider: "openai",
+        llmModel: "glm-5.2",
+        embedBaseUrl: "https://gw/v1",
+        embedModel: "text-embedding-v4",
+        apiKey: "sk-shared",
+        embeddingDim: 2048,
+        sendDimensions: true,
+      }),
+    })
+    await svc.ensureReady()
+    const env = runner.getSpec()!.env
+    expect(env["KL_EMBED_API_KEY"]).toBe("sk-shared")
+    expect(env["OPENAI_API_KEY"]).toBe("sk-shared")
+  })
 })
 
 /**
@@ -525,6 +630,40 @@ describe("KlServerService · 网关变更后重起（onGatewayChanged）", () =>
 
     expect(svc.status().state).toBe("stopped")
     expect(runner.getSpec()).toBeNull()
+  })
+
+  /**
+   * ★★ 只改 **embedding 那把 key** 也必须重起。
+   *
+   * 指纹（`gatewayFingerprint`）是"要不要重起"的唯一判据。`embedApiKey`
+   * 没进指纹的话，用户换了 embedding 密钥算不出变化 → kl 不重起 →
+   * 它继续用旧 key 出网。表现是换了 key 却依然 401，而设置页显示保存成功
+   * —— 与本 describe 顶部那个"填了 key 却永远建不出图"是同一类静默失败。
+   */
+  it("★★ 只改 embedApiKey → 也要重起（否则 kl 继续用旧 key 出网）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner()
+    const current = {
+      llmBaseUrl: "https://gw/v1",
+      apiKey: "sk-llm",
+      embedBaseUrl: "https://embed.example/v1",
+      embedApiKey: "sk-embed-old",
+    }
+    const svc = makeService({
+      runner,
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      gateway: () => ({ ...current }),
+    })
+    await svc.ensureReady()
+    expect(runner.getSpec()!.env["KL_EMBED_API_KEY"]).toBe("sk-embed-old")
+
+    // 只换 embedding 那把（长度也变了，指纹记的是长度）
+    current.embedApiKey = "sk-embed-brand-new"
+    await svc.onGatewayChanged()
+
+    expect(svc.status().state).toBe("ready")
+    expect(runner.getSpec()!.env["KL_EMBED_API_KEY"]).toBe("sk-embed-brand-new")
   })
 
   /**

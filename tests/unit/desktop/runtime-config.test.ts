@@ -539,3 +539,199 @@ describe("主模型协议", () => {
     ctx.close()
   })
 })
+
+/**
+ * embedding 三项独立可配。
+ *
+ * ## 为什么加这一组
+ *
+ * 改动前 embedding 的地址是从 KL 地址**推导**的（`openAiEmbedBaseUrl(base)`），
+ * 配置层没有任何入口把它指到别处。而实测遇到过只给 chat 不给 embedding 的
+ * 网关（`/models` 12 个模型全是 chat/image/audio，`/embeddings` 对任何模型名
+ * 都回 `Model not exist.`）—— 那种网关上 LLM 能用而建图必卡在算向量。
+ *
+ * 这一组锁两件事：① 新字段确实能覆盖；② **没配过的用户行为逐字不变**
+ * （后者是这次改动的兼容性底线）。
+ */
+describe("embedding 三项", () => {
+  it("★ 没配过 → 沿用 KL 地址 + 内置默认（与改动前逐字一致）", () => {
+    const ctx = makeService()
+    ctx.service.save({ llmBaseUrl: "https://gw/compatible-mode/v1" }, NOW)
+    const r = ctx.service.resolved()
+    // 地址沿用 KL（此处 KL 留空 → 回退主配置），归一化到恰好一个 /v1
+    expect(r.embedBaseUrl).toBe("https://gw/compatible-mode/v1")
+    expect(r.embeddingDim).toBe(2048)
+    expect(r.embedSendDimensions).toBe(true)
+    // 视图里这三项标 default（它们没有 env 默认层）
+    expect(ctx.service.view().embedBaseUrl.source).toBe("default")
+    expect(ctx.service.view().embeddingDim.source).toBe("default")
+    ctx.close()
+  })
+
+  it("★ embedding 地址可独立于 LLM 地址 —— 这次改动的核心", () => {
+    const ctx = makeService()
+    ctx.service.save(
+      {
+        llmBaseUrl: "https://chat-only.example/compatible-mode/v1",
+        embedBaseUrl: "https://embed.example/v1",
+      },
+      NOW,
+    )
+    const r = ctx.service.resolved()
+    // LLM 打一个 host，embedding 打另一个 —— 改动前这做不到
+    expect(r.llmBaseUrl).toBe("https://chat-only.example/compatible-mode/v1")
+    expect(r.embedBaseUrl).toBe("https://embed.example/v1")
+    expect(ctx.service.view().embedBaseUrl.source).toBe("user")
+    ctx.close()
+  })
+
+  it("embedding 地址同样归一化 /v1（用户手填也会带不带都有）", () => {
+    const ctx = makeService()
+    // 结尾没 /v1 → 补；重复的 /v1/v1 → 收敛成一个；结尾斜杠先剥掉
+    ctx.service.save({ embedBaseUrl: "https://embed.example" }, NOW)
+    expect(ctx.service.resolved().embedBaseUrl).toBe("https://embed.example/v1")
+    ctx.service.save({ embedBaseUrl: "https://embed.example/v1/v1/" }, NOW)
+    expect(ctx.service.resolved().embedBaseUrl).toBe("https://embed.example/v1")
+    ctx.close()
+  })
+
+  it("空串清空 embedding 地址 → 回退沿用 KL 地址", () => {
+    const ctx = makeService()
+    ctx.service.save({ llmBaseUrl: "https://gw/v1", embedBaseUrl: "https://embed.example/v1" }, NOW)
+    expect(ctx.service.resolved().embedBaseUrl).toBe("https://embed.example/v1")
+    ctx.service.save({ embedBaseUrl: "" }, NOW)
+    expect(ctx.service.resolved().embedBaseUrl).toBe("https://gw/v1")
+    expect(ctx.service.view().embedBaseUrl.source).toBe("default")
+    ctx.close()
+  })
+
+  it("维度可覆盖；null 清空回退 2048", () => {
+    const ctx = makeService()
+    ctx.service.save({ embeddingDim: 1024 }, NOW)
+    expect(ctx.service.resolved().embeddingDim).toBe(1024)
+    expect(ctx.service.view().embeddingDim.source).toBe("user")
+    ctx.service.save({ embeddingDim: null }, NOW)
+    expect(ctx.service.resolved().embeddingDim).toBe(2048)
+    ctx.close()
+  })
+
+  /**
+   * ★★ 这条是这一组里最要紧的。
+   *
+   * `false` 是一个用户**真会选**的有效值（自建 vLLM 拒收带 `dimensions` 的请求）。
+   * 若 save 用「假值即清空」那套语义，"关掉"这个动作就永远存不进去 ——
+   * 界面上点了关、存完再读回来又是开。所以清空必须用显式 `null`。
+   */
+  it("★ sendDimensions=false 能真的存下来（不被当成「没填」）", () => {
+    const ctx = makeService()
+    ctx.service.save({ embedSendDimensions: false }, NOW)
+    expect(ctx.service.resolved().embedSendDimensions).toBe(false)
+    expect(ctx.service.view().embedSendDimensions.source).toBe("user")
+    // null 才是清空 → 回退内置默认 true
+    ctx.service.save({ embedSendDimensions: null }, NOW)
+    expect(ctx.service.resolved().embedSendDimensions).toBe(true)
+    ctx.close()
+  })
+
+  it("undefined = 不改（只动维度不该碰地址与开关）", () => {
+    const ctx = makeService()
+    ctx.service.save({ embedBaseUrl: "https://embed.example/v1", embedSendDimensions: false }, NOW)
+    ctx.service.save({ embeddingDim: 4096 }, NOW)
+    const r = ctx.service.resolved()
+    expect(r.embedBaseUrl).toBe("https://embed.example/v1")
+    expect(r.embedSendDimensions).toBe(false)
+    expect(r.embeddingDim).toBe(4096)
+    ctx.close()
+  })
+
+  it("klEffective.embedBaseUrl 给出实际生效地址（UI 显示回退到了什么）", () => {
+    const ctx = makeService()
+    ctx.service.save({ llmBaseUrl: "https://gw", klLlmBaseUrl: "https://kl-gw" }, NOW)
+    // 没单独配 embedding → 沿用 KL（不是主配置）
+    expect(ctx.service.view().klEffective.embedBaseUrl).toBe("https://kl-gw/v1")
+    ctx.close()
+  })
+
+  /**
+   * ★★ 密钥必须跟着地址一起可配。
+   *
+   * 地址一旦指到别的 host，KL 那把 key 对新 host 几乎必然 401 ——
+   * 「地址能配而密钥不能」等于这个功能只在"新 host 恰好不校验密钥"时
+   * 才成立。而那个 401 在建图链路上表现为 embedding 批次反复重试退避，
+   * 界面上无声。
+   */
+  it("★ embedding 密钥可独立于 LLM/KL 那把", () => {
+    const ctx = makeService()
+    ctx.service.save(
+      {
+        llmBaseUrl: "https://chat-only.example/v1",
+        llmApiKey: "sk-llm-key",
+        embedBaseUrl: "https://embed.example/v1",
+        embedApiKey: "sk-embed-key",
+      },
+      NOW,
+    )
+    const r = ctx.service.resolved()
+    expect(r.llmApiKey).toBe("sk-llm-key")
+    expect(r.embedApiKey).toBe("sk-embed-key")
+    // 视图里只给后 4 位，不回显明文
+    const v = ctx.service.view().embedApiKey
+    expect(v.configured).toBe(true)
+    expect(v.source).toBe("user")
+    expect(v.tail).toBe("-key")
+    ctx.close()
+  })
+
+  it("没单独填 embedding 密钥 → 沿用 KL 那把（KL 也没填则沿用主配置那把）", () => {
+    const ctx = makeService()
+    ctx.service.save({ llmApiKey: "sk-main" }, NOW)
+    // KL 没填 → KL 用主配置那把 → embedding 再沿用它
+    expect(ctx.service.resolved().embedApiKey).toBe("sk-main")
+    ctx.service.save({ klLlmApiKey: "sk-kl" }, NOW)
+    expect(ctx.service.resolved().embedApiKey).toBe("sk-kl")
+    ctx.close()
+  })
+
+  /**
+   * ★ 「跟随」态不能显示成「已配置」。
+   *
+   * `configured` 报的是"这一路到底有没有 key 可用"（回退解析后的结果），
+   * 而 `source` 区分"自己填的"与"回退来的"。UI 靠 source 显示「跟随知识库」
+   * —— 只看 configured 的话，回退态会显示成"已配置"，那是假反馈
+   * （用户会以为自己给 embedding 单独配过一把）。
+   */
+  it("★ 回退态：configured=true 但 source=default（UI 据此说「跟随」而不是「已配置」）", () => {
+    const ctx = makeService()
+    ctx.service.save({ llmApiKey: "sk-main" }, NOW)
+    const v = ctx.service.view().embedApiKey
+    expect(v.configured).toBe(true)
+    expect(v.source).toBe("default")
+    // 回退来的那把不回显后 4 位（那是别人的 key）
+    expect(v.tail).toBeNull()
+    ctx.close()
+  })
+
+  it("一把 key 都没有 → configured=false", () => {
+    const ctx = makeService(loadConfig({ env: {} }))
+    expect(ctx.service.view().embedApiKey.configured).toBe(false)
+    ctx.close()
+  })
+
+  it("清空 embedding 密钥（null）→ 回退沿用 KL 那把", () => {
+    const ctx = makeService()
+    ctx.service.save({ llmApiKey: "sk-main", embedApiKey: "sk-embed" }, NOW)
+    expect(ctx.service.resolved().embedApiKey).toBe("sk-embed")
+    ctx.service.save({ embedApiKey: null }, NOW)
+    expect(ctx.service.resolved().embedApiKey).toBe("sk-main")
+    expect(ctx.service.view().embedApiKey.source).toBe("default")
+    ctx.close()
+  })
+
+  it("undefined = 不改（改地址不该动已存的 embedding 密钥）", () => {
+    const ctx = makeService()
+    ctx.service.save({ embedApiKey: "sk-embed" }, NOW)
+    ctx.service.save({ embedBaseUrl: "https://other.example/v1" }, NOW)
+    expect(ctx.service.resolved().embedApiKey).toBe("sk-embed")
+    ctx.close()
+  })
+})
