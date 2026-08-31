@@ -140,10 +140,16 @@ acp-stream-dump.json
 # · `.claude/` —— 本机 agent 配置与内部 skill（`gpt-image/` 写着私有网关地址与
 #   key 的取法；`hitg-cli/` 驱动内部后端；`find-skills` 是指向仓库外的死软链）；
 # · `.agents/` —— 上面那条软链的目标，同样是本机 skill 目录；
-# · `.hitg_attachments/` —— 会话临时附件（截图等），不是代码。
+# · `.hitg_attachments/` / `.hitg-attachments/` —— 会话临时附件（截图等），
+#   不是代码。★★ 两种写法都要挡：下划线那一版是最早写的，而工具**实际**
+#   建的目录名是**连字符**的 `.hitg-attachments/`。只写下划线那一版等于没挡
+#   —— 实测过：产品发来的截图（带真实姓名与内网邮箱）就落在连字符那个目录里，
+#   `git status` 把它列成未跟踪文件，一次 `git add -A` 就会进公开仓库。
+#   这不是假设，那次是靠"显式列 12 个文件路径 add"才没提交进去。
 #
 # 产品真正要随包分发的 skill 在 `apps/desktop/resources/skills/`
 # （由 `pnpm sync:kl-skill` 生成，且过脱敏），与这里无关。
 .claude/
 .agents/
 .hitg_attachments/
+.hitg-attachments/
