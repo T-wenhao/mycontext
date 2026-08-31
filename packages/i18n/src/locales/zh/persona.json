@@ -164,6 +164,7 @@
   "railNoDraft": "没有草稿模式的会话",
   "railNoAuto": "还没有会话开启自动判断 —— 去会话设置里把回复方式改成「自动发送」。",
   "railNoMessages": "还没有消息",
+  "railNotCollected": "未在采集范围内，没有取消息",
   "railPreviewSelf": "我：{{text}}",
   "railPreviewSender": "{{sender}}：{{text}}",
   "dockTabsLabel": "回复候选",

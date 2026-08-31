@@ -28,7 +28,7 @@ import { useMemo, useState } from "react"
 import { Avatar, Input, SegmentedControl, cn } from "@mycontext/design"
 import type { PersonaConversationView } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
-import { formatRailTime } from "./message-time.js"
+import { formatRailTime, isDisplayableTime } from "./message-time.js"
 
 export interface ConversationRailProps {
   items: readonly PersonaConversationView[]
@@ -326,6 +326,36 @@ function ConversationRow({
     return text
   }, [item.lastMessageText, item.lastMessageIsSelf, item.lastMessageSender, item.kind, t])
 
+  /**
+   * 没有预览时那一行说什么。
+   *
+   * ## ★★★ 「还没有消息」曾经是一句**可能不实**的话
+   *
+   * 产品报过一个看不懂的组合：某一行带着 **37 未读**徽标，而预览写着
+   * 「还没有消息」。两个数字来自两个源，各自都没错：
+   *
+   * | | 来源 | 过采集范围闸吗 |
+   * |---|---|---|
+   * | `unreadCount` | 渠道探针的红点 | **不过** —— 列表级信息 |
+   * | `lastMessageText` | 本地 `messages` 表 | **过** —— 范围外压根不拉 |
+   *
+   * 于是范围外的会话必然长成「有未读、无正文」。而这时说「还没有消息」
+   * 是在**替对方背锅**：听起来像"对方没发过"，实情是"我们没采"。
+   * 用户据此会去等一条其实已经到了的消息。
+   *
+   * ★ 判据用 `messageCount === 0 && unreadCount > 0`：
+   * · 一条都没入库（`messageCount === 0`）→ 我们这边是空的；
+   * · 而红点说有未读 → 那边**确实有**内容。
+   * 两个条件同时成立才能断定"有消息但我们没采"。只看 `unreadCount`
+   * 不够：范围内的会话也会有未读，但那时正文是有的（走不到这个分支）。
+   *
+   * ★★ 反过来 `messageCount > 0` 而预览为空是另一回事（最新那条正文是
+   * 空串、或只有媒体占位），那时保持原文案 —— 它不误导，
+   * 而扩大这一轮的范围会把两个不同的问题混在一起。
+   */
+  const emptyLabel =
+    item.messageCount === 0 && item.unreadCount > 0 ? t("railNotCollected") : t("railNoMessages")
+
   return (
     <button
       type="button"
@@ -348,16 +378,21 @@ function ConversationRow({
           <span className="typography-body-small-400 min-w-0 flex-1 truncate text-[var(--text-base-primary)]">
             {item.title ?? item.externalId}
           </span>
-          {item.lastMessageAt === null ? null : (
+          {/*
+            ★ 判据是「值得显示吗」而不是「是不是 null」—— 旧库里有被
+            存储层写成 0 的行（那个 bug 已修 + 有迁移，但装了旧版的机器
+            升级前仍会读到）。见 `isDisplayableTime` 的注释。
+          */}
+          {isDisplayableTime(item.lastMessageAt) ? (
             <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
               {formatRailTime(item.lastMessageAt)}
             </span>
-          )}
+          ) : null}
         </span>
         {/* 第二行：最新一条 + 徽标。徽标与预览同一行 —— 竖着堆会让每行占三行高 */}
         <span className="flex items-center gap-1.5">
           <span className="typography-caption-400 min-w-0 flex-1 truncate text-[var(--text-base-tertiary)]">
-            {preview ?? t("railNoMessages")}
+            {preview ?? emptyLabel}
           </span>
           {/*
             三个徽标，含义各不相同，所以视觉也必须不同：

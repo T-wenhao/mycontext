@@ -47,6 +47,31 @@ export class ConversationRepository {
    * 刻意**不覆盖** `is_bot_channel`：那个值可能是用户手动改过的
    * （启发式判断会误判，用户纠正后不该被下一次采集抹掉）。
    * 同理 `created_at` 保留首次见到的时间。
+   *
+   * ## ★★★ `last_message_at` 为什么不能用 `MAX(COALESCE(…,0), COALESCE(…,0))`
+   *
+   * 那是这里出过的一个真 bug：**侧栏显示一排 `1970/1/1`**。
+   *
+   * `COALESCE(…,0)` 的用意是让 `MAX` 能比较（SQLite 的 `MAX(NULL, 5)` 返回
+   * NULL，会把已有时间抹掉）。但它把「**不知道**」和「**1970 年 1 月 1 日**」
+   * 折成了同一个值 —— 而这两件事在界面上的出路完全不同：前者该隐藏，
+   * 后者是一个真实（虽然荒谬）的时间。
+   *
+   * 失效路径很隐蔽，因为**第一次插入是对的**：
+   *
+   * ```
+   * 第一次 INSERT（无时间）        → NULL   ← 对，UI 隐藏这一列
+   * 第二次 upsert（仍然无时间）    → MAX(0, 0) = 0   ← 变成 0 了
+   * 渲染 0                        → 1970/1/1
+   * ```
+   *
+   * 会话目录是**反复**同步的（每一轮采集都 upsert 一遍整个列表），所以
+   * 任何"从来没有过消息"的会话在第二轮之后必然显示 1970。而它不报错、
+   * 不影响采集、只是界面上多了个荒谬的日期 —— 正是本仓库最怕的那类
+   * 静默降级：每一层看起来都在正常工作。
+   *
+   * 现在的写法保住三态：两边都 NULL → 仍是 NULL；只有一边有值 → 取那个值；
+   * 两边都有 → 取较大的那个（`MAX` 的原意）。
    */
   upsert(input: ConversationInput): void {
     this.db
@@ -59,9 +84,13 @@ export class ConversationRepository {
            type            = excluded.type,
            title           = COALESCE(excluded.title, conversations.title),
            member_count    = COALESCE(excluded.member_count, conversations.member_count),
+           -- ★ 保住 NULL 语义（见方法上面那段注释）：两边都没有时间时结果
+           -- 仍然是 NULL，不是 0。MAX 只在两边都有值时才需要，所以先各自
+           -- COALESCE 到**对方**的值 —— 任一边为 NULL 时结果就是另一边，
+           -- 两边都 NULL 时 MAX(NULL, NULL) 自然还是 NULL。
            last_message_at = MAX(
-             COALESCE(excluded.last_message_at, 0),
-             COALESCE(conversations.last_message_at, 0)
+             COALESCE(excluded.last_message_at, conversations.last_message_at),
+             COALESCE(conversations.last_message_at, excluded.last_message_at)
            )`,
       )
       .run(

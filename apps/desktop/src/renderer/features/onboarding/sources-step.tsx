@@ -44,6 +44,7 @@ import { DocumentSpacePicker } from "./document-space-picker.js"
 import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { StepSection, SubGroup } from "./step-section.js"
+import { isDisplayableTime } from "../persona/message-time.js"
 
 /**
  * 时间范围的预设。`null` 表示不限 —— 与"0 天"完全不同，别用 0 表示。
@@ -1197,8 +1198,11 @@ function ConversationGroup({
                           {t("sourcesStep.memberCount", { count: item.memberCount })}
                         </span>
                       ) : null}
-                      {item.lastMessageAt === null ? (
-                        // 「还没采过」是事实而不是缺陷：群列表那一路没有时间字段
+                      {!isDisplayableTime(item.lastMessageAt) ? (
+                        // 「还没采过」是事实而不是缺陷：群列表那一路没有时间字段。
+                        // ★ 判据用 isDisplayableTime 而不是 `=== null`：旧库里
+                        // 有被存储层写成 0 的行（那个 bug 已修 + 有迁移），
+                        // 只判 null 会让这些行**反而丢掉**这句提示。
                         <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
                           {t("sourcesStep.noMessages")}
                         </span>

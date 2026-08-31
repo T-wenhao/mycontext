@@ -108,6 +108,32 @@ export function dayKey(ms: number): string {
   return `${String(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+/**
+ * 这个时间戳**值得显示**吗。
+ *
+ * ## ★★★ 为什么需要它（而不是各调用点自己判 `=== null`）
+ *
+ * 出过一个真 bug：侧栏显示一排 `1970/1/1`。根因在存储层
+ * （`ConversationRepository.upsert` 用 `COALESCE(…, 0)` 把「不知道」
+ * 折成了 0，见那里的注释），已经修了 + 加了迁移。
+ *
+ * 但**旧库里已经写进去的 0 不会自己消失**，而且这类"把缺失折成 0"的
+ * 写法在任何一层都可能再出现一次。所以显示侧也要有一道：
+ * 判据从「是不是 null」扩到「是不是一个**值得显示**的时间」。
+ *
+ * ★ 挡 `<= 0` 而不只挡 `=== 0`：负数同样不是真实消息时间，而它在
+ * `new Date()` 里会渲染成 1969 年 —— 与 1970 一样荒谬。
+ * ★ 也挡 `NaN` / `Infinity`：`new Date(NaN)` 渲染成 `Invalid Date`，
+ * 那比隐藏更糟（用户看到的是一个明显的故障字样）。
+ *
+ * ★★ 判据是「**荒谬**」而不是「**太旧**」：不挑 2010 年这类"合理下界"，
+ * 因为那会顺手隐藏一批成因不明的真实数据 —— 真有 1971 年的脏值，
+ * 那是另一个 bug，该单独查而不是在显示层盖掉。
+ */
+export function isDisplayableTime(ms: number | null | undefined): ms is number {
+  return ms !== null && ms !== undefined && Number.isFinite(ms) && ms > 0
+}
+
 function pad(value: number): string {
   return String(value).padStart(2, "0")
 }

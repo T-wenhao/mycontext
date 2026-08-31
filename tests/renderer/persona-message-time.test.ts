@@ -15,7 +15,13 @@
  *    "昨天"仍然对（用户就是那么说的），而再往前一天要显示年份。
  */
 import { describe, expect, it } from "vitest"
-import { dayKey, dayLabel, fullLabel, timeLabel } from "@renderer/features/persona/message-time"
+import {
+  dayKey,
+  dayLabel,
+  fullLabel,
+  isDisplayableTime,
+  timeLabel,
+} from "@renderer/features/persona/message-time"
 
 /** 2026-07-30 15:00 周四。 */
 const NOW = new Date(2026, 6, 30, 15, 0, 0).getTime()
@@ -96,5 +102,39 @@ describe("分组 key 与完整时间", () => {
 
   it("完整时间任何情况下都自明（hover 提示用）", () => {
     expect(fullLabel(at(2025, 1, 5, 9, 7))).toBe("2025-01-05 09:07")
+  })
+})
+
+/**
+ * ★★★ 「这个时间戳值得显示吗」—— 修「侧栏一排 1970/1/1」那个 bug 的显示侧一道。
+ *
+ * 根因在存储层（`upsert` 用 `COALESCE(…, 0)` 把「不知道」折成了 0，
+ * 已修 + 有 v32 迁移）。但旧库里已经写进去的 0 在升级前仍会被读到，
+ * 而这类"把缺失折成 0"的写法在任何一层都可能再出现一次 ——
+ * 所以显示侧的判据必须从「是不是 null」扩成「值不值得显示」。
+ */
+describe("★★ isDisplayableTime", () => {
+  it("★ 0 不显示 —— 那是「不知道」被折成的值，渲染出来是 1970/1/1", () => {
+    expect(isDisplayableTime(0)).toBe(false)
+  })
+
+  it("null / undefined 不显示（本来就没有时间）", () => {
+    expect(isDisplayableTime(null)).toBe(false)
+    expect(isDisplayableTime(undefined)).toBe(false)
+  })
+
+  it("★ 负数不显示 —— new Date(-1) 渲染成 1969 年，与 1970 一样荒谬", () => {
+    expect(isDisplayableTime(-1)).toBe(false)
+  })
+
+  it("★ NaN / Infinity 不显示 —— new Date(NaN) 会渲染成 Invalid Date", () => {
+    expect(isDisplayableTime(Number.NaN)).toBe(false)
+    expect(isDisplayableTime(Number.POSITIVE_INFINITY)).toBe(false)
+  })
+
+  it("真实时间显示", () => {
+    expect(isDisplayableTime(at(2026, 7, 30))).toBe(true)
+    // 1ms 也显示：荒谬但不是那个 bug 造的，显示层不替它做判断（见函数注释）
+    expect(isDisplayableTime(1)).toBe(true)
   })
 })

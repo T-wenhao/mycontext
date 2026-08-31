@@ -164,6 +164,7 @@
   "railNoDraft": "No draft-mode conversations",
   "railNoAuto": "No conversation uses auto-send yet — set the reply mode to Auto in conversation settings.",
   "railNoMessages": "No messages yet",
+  "railNotCollected": "Outside the collection scope — messages not fetched",
   "railPreviewSelf": "Me: {{text}}",
   "railPreviewSender": "{{sender}}: {{text}}",
   "dockTabsLabel": "Reply candidates",
