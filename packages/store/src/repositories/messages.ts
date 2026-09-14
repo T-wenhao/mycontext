@@ -458,11 +458,15 @@ export class MessageRepository {
      * 走子查询把 external_id 翻成内部 id 再过滤。空/不传 = 不限。
      */
     conversationExternalIds?: readonly string[]
+    /** Distinguishes an explicitly empty allow-list from an unrestricted scope. */
+    conversationScopeRestricted?: boolean
   }): MessageRow[] {
     const ids = spec.conversationExternalIds ?? []
     const scopeClause =
       ids.length === 0
-        ? ""
+        ? spec.conversationScopeRestricted === true
+          ? " AND 0"
+          : ""
         : ` AND conversation_id IN (SELECT id FROM conversations WHERE external_id IN (${ids
             .map(() => "?")
             .join(",")}))`

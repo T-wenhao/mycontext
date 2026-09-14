@@ -82,6 +82,10 @@ export const IPC_CHANNELS = {
   distillProgress: "mycontext:distill/progress",
   distillStart: "mycontext:distill/start",
   distillReset: "mycontext:distill/reset",
+  /** 外部推理 worker 的交接与不含正文的生命周期状态。 */
+  externalInferenceStatus: "mycontext:external-inference/status",
+  externalInferenceHandoff: "mycontext:external-inference/handoff",
+  externalInferenceSetMode: "mycontext:external-inference/set-mode",
   /**
    * 清空当前渠道的数据（不可逆）。
    *
@@ -1255,6 +1259,66 @@ export const distillStartInputSchema = z.object({
   days: z.number().nullable().optional(),
   windowDays: z.number().optional(),
 })
+
+export const externalInferenceWorkerInputSchema = z.object({
+  workerId: z.string().trim().min(1).max(128),
+})
+
+export const externalInferenceModeInputSchema = z.object({
+  externalOnly: z.boolean(),
+})
+
+export const externalInferenceJobStateSchema = z.enum([
+  "pending",
+  "leased",
+  "committed",
+  "failed",
+  "skipped",
+])
+
+export const externalInferenceJobSchema = z.object({
+  id: z.string(),
+  domainKind: z.literal("distillation"),
+  domainRef: z.string(),
+  state: externalInferenceJobStateSchema,
+  attempts: z.number().int(),
+  leaseOwner: z.string().nullable(),
+  leaseExpiresAt: z.number().nullable(),
+  promptVersion: z.string(),
+  contractVersion: z.string(),
+  submissionId: z.string().nullable(),
+  submissionDigest: z.string().nullable(),
+  resultCount: z.number().int().nullable(),
+  usageTokens: z.number().int().nullable(),
+  lastError: z.string().nullable(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+export const externalInferenceStatusSchema = z.object({
+  total: z.number().int(),
+  pending: z.number().int(),
+  leased: z.number().int(),
+  committed: z.number().int(),
+  failed: z.number().int(),
+  skipped: z.number().int(),
+  jobs: z.array(externalInferenceJobSchema),
+  endpoint: z.string().nullable(),
+  handoffPath: z.string().nullable(),
+  externalOnly: z.boolean(),
+  activeCredentials: z.number().int(),
+})
+
+export const externalInferenceHandoffSchema = z.object({
+  path: z.string(),
+  endpoint: z.string(),
+  workerId: z.string(),
+  expiresAt: z.number(),
+  externalOnly: z.literal(true),
+})
+
+export type ExternalInferenceStatusView = z.infer<typeof externalInferenceStatusSchema>
+export type ExternalInferenceHandoffView = z.infer<typeof externalInferenceHandoffSchema>
 
 // ---------------------------------------------------------------
 // 数字人

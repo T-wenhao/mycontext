@@ -208,6 +208,27 @@ describe("★★ 真渲染：摘要不是原样的 i18n 键，收起的内容不
         snapshot: () => new Promise(() => undefined),
         onProgress: () => () => undefined,
       },
+      externalInference: {
+        status: () =>
+          Promise.resolve({
+            ok: true as const,
+            data: {
+              total: 0,
+              pending: 0,
+              leased: 0,
+              committed: 0,
+              failed: 0,
+              skipped: 0,
+              jobs: [],
+              endpoint: "http://127.0.0.1:9000/mcp",
+              handoffPath: null,
+              externalOnly: false,
+              activeCredentials: 0,
+            },
+          }),
+        handoff: () => new Promise(() => undefined),
+        setMode: () => new Promise(() => undefined),
+      },
       kl: {
         serverStatus: () =>
           Promise.resolve({

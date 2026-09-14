@@ -32,6 +32,7 @@ import { unwrap } from "./api.js"
 export const QUERY_KEYS = {
   bootstrap: ["bootstrap"] as const,
   status: ["status"] as const,
+  externalInference: ["external-inference"] as const,
   channels: ["channels"] as const,
   ingest: ["ingest"] as const,
   /** 已解析的本人身份（只读）。与 ingest 分开：它变化频率低得多 */
@@ -69,6 +70,39 @@ export function useStatusReport(enabled: boolean) {
     queryKey: QUERY_KEYS.status,
     queryFn: async () => unwrap(await window.mycontext.app.statusReport()),
     enabled,
+  })
+}
+
+/** 外部任务是异步执行的，状态页打开时短轮询即可看到领取与提交变化。 */
+export function useExternalInferenceStatus(enabled = true) {
+  return useQuery({
+    queryKey: QUERY_KEYS.externalInference,
+    queryFn: async () => unwrap(await window.mycontext.externalInference.status()),
+    enabled,
+    refetchInterval: enabled ? 2_000 : false,
+  })
+}
+
+export function useExternalInferenceHandoff() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (workerId: string) =>
+      unwrap(await window.mycontext.externalInference.handoff({ workerId })),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.externalInference })
+    },
+  })
+}
+
+export function useExternalInferenceMode() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (externalOnly: boolean) =>
+      unwrap(await window.mycontext.externalInference.setMode({ externalOnly })),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.externalInference })
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.distillProgress })
+    },
   })
 }
 

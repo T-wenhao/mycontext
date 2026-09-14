@@ -71,6 +71,7 @@
       "database": "Database (migrated to v{{version}})",
       "config": "Configuration",
       "dataPlane": "Data plane",
+      "externalInference": "External inference",
       "kl": "Knowledge graph (kl)"
     },
     "runtime": {
@@ -150,6 +151,21 @@
         "dingtalk": "DingTalk",
         "feishu": "Feishu"
       }
+    },
+    "externalInference": {
+      "description": "Hand expensive distillation to a local agent you choose. MyContext supplies bounded evidence and keeps validation and writes host-owned. It never falls back to a paid model automatically.",
+      "loading": "Loading external job status…",
+      "unavailable": "The external inference host is not attached.",
+      "enabled": "External only",
+      "disabled": "Disabled",
+      "prepare": "Prepare handoff",
+      "stop": "Stop and revoke",
+      "pending": "Pending",
+      "leased": "Running",
+      "committed": "Committed",
+      "failed": "Failed",
+      "handoffPath": "Handoff manifest",
+      "handoffHint": "Give only this manifest path to the agent you selected. Stopping immediately revokes its credential and active leases."
     },
     "topology": {
       "title": "Data plane",

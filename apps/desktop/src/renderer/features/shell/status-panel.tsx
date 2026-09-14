@@ -25,6 +25,9 @@ import { Button, Disclosure } from "@mycontext/design"
 import type { ConfigEntryView, KlServerStatus } from "@mycontext/ipc-contract"
 import {
   useStatusReport,
+  useExternalInferenceHandoff,
+  useExternalInferenceMode,
+  useExternalInferenceStatus,
   useKlServerStatus,
   useKlServerStart,
   useKlServerStop,
@@ -116,6 +119,8 @@ export function StatusPanel() {
       <CollectionScopePanel channelId={statusChannel} />
 
       <IngestIntervalsPanel />
+
+      <ExternalInferencePanel />
 
       {/*
         ★ 与数据面**共用同一个渠道选择** —— 这一页只有一个取值范围。
@@ -254,6 +259,108 @@ export function StatusPanel() {
         </Disclosure>
       </div>
     </div>
+  )
+}
+
+/**
+ * 外部推理的本机交接与状态入口。
+ *
+ * renderer 只拿到 0600 清单的路径，不拿 bearer；用户把这一个明确路径交给
+ * 自己选择的 Agent。停止时主进程会同时撤凭据、租约并删除清单。
+ */
+function ExternalInferencePanel() {
+  const { t } = useDynamicTranslation("settings")
+  const errorText = useErrorText()
+  const status = useExternalInferenceStatus()
+  const handoff = useExternalInferenceHandoff()
+  const mode = useExternalInferenceMode()
+  const snapshot = status.data
+  const handoffPath = handoff.data?.path ?? snapshot?.handoffPath ?? null
+  const pending = handoff.isPending || mode.isPending
+
+  return (
+    <Section title={t("status.sections.externalInference")}>
+      <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+        {t("status.externalInference.description")}
+      </p>
+
+      {status.isLoading ? (
+        <p className="typography-body-small-400 text-[var(--text-base-tertiary)]">
+          {t("status.externalInference.loading")}
+        </p>
+      ) : snapshot === undefined ? (
+        <p className="typography-body-small-400 text-[var(--status-error)]">
+          {status.error === null
+            ? t("status.externalInference.unavailable")
+            : errorText(status.error)}
+        </p>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`typography-caption-400 inline-flex items-center radius-sm px-2 py-0.5 ${
+                snapshot.externalOnly
+                  ? "bg-[var(--status-fill-success-container)] text-[var(--status-success)]"
+                  : "bg-[var(--bg-card-z0)] text-[var(--text-base-tertiary)]"
+              }`}
+            >
+              {t(
+                snapshot.externalOnly
+                  ? "status.externalInference.enabled"
+                  : "status.externalInference.disabled",
+              )}
+            </span>
+            <Button
+              size="sm"
+              loading={handoff.isPending}
+              disabled={pending || snapshot.endpoint === null}
+              onClick={() => handoff.mutate("selected-worker")}
+            >
+              {t("status.externalInference.prepare")}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={mode.isPending}
+              disabled={pending || !snapshot.externalOnly}
+              onClick={() => mode.mutate(false)}
+            >
+              {t("status.externalInference.stop")}
+            </Button>
+          </div>
+
+          <Grid>
+            <Item label={t("status.externalInference.pending")} value={String(snapshot.pending)} />
+            <Item label={t("status.externalInference.leased")} value={String(snapshot.leased)} />
+            <Item
+              label={t("status.externalInference.committed")}
+              value={String(snapshot.committed)}
+            />
+            <Item label={t("status.externalInference.failed")} value={String(snapshot.failed)} />
+          </Grid>
+
+          {handoffPath !== null && (
+            <div className="flex flex-col gap-1">
+              <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+                {t("status.externalInference.handoffPath")}
+              </span>
+              <code className="typography-body-small-400 break-all font-mono-token text-[var(--text-base-primary)]">
+                {handoffPath}
+              </code>
+              <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+                {t("status.externalInference.handoffHint")}
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+      {(handoff.error !== null || mode.error !== null) && (
+        <p className="typography-body-small-400 text-[var(--status-error)]" role="alert">
+          {errorText(handoff.error ?? mode.error)}
+        </p>
+      )}
+    </Section>
   )
 }
 

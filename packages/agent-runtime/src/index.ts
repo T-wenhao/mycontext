@@ -63,6 +63,17 @@ export { McpAuth, scopeToConversationFilter } from "./mcp/auth.js"
 export type { McpAuthOptions, McpScope, McpTokenKind, IssuedToken } from "./mcp/auth.js"
 
 export { buildKlSkillMarkdown, KL_SKILL_RELPATH } from "./kl-skill.js"
+export {
+  ExternalInferenceCredentialAuthority,
+  ExternalInferenceMcpServer,
+  EXTERNAL_INFERENCE_MCP_PATH,
+  EXTERNAL_INFERENCE_TOOLS,
+} from "./external-inference-server.js"
+export type {
+  ExternalInferenceCredential,
+  ExternalInferenceCredentialOptions,
+  ExternalInferenceMcpServerOptions,
+} from "./external-inference-server.js"
 
 export { installSkills, SKILLS_RELDIR } from "./workspace.js"
 export type { SkillSource, InstallSkillsResult } from "./workspace.js"

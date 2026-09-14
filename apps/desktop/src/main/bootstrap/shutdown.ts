@@ -46,6 +46,7 @@ import type { Clock, Logger } from "@mycontext/kernel"
  *   `shutdown step timed out {"step":"klServer","durationMs":2001}` 恒定出现）
  *   —— 一条恒定的 warn 等于没有 warn，它会把真正的超时埋掉。
  *   给到 4s 让那条 SIGKILL 兜底能跑完，同时仍远小于硬超时。
+ * · `externalInference` —— 停 loopback MCP 并撤 worker credentials，1s；
  * · `persona` / `distill` —— 等在途的一轮 agent/蒸馏收尾，各 2s；
  * · `dataPlane` —— 等在途的采集轮次（可能正 await 一个 0.6s 的 DWS 子进程），
  *   给 2s；
@@ -57,6 +58,7 @@ import type { Clock, Logger } from "@mycontext/kernel"
  */
 export const SHUTDOWN_STEP_TIMEOUTS = {
   search: 3_000,
+  externalInference: 1_000,
   klServer: 4_000,
   persona: 2_000,
   distill: 2_000,

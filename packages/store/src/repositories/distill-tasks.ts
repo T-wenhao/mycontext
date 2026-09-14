@@ -101,6 +101,13 @@ export interface DistillProgress {
 export class DistillTaskRepository {
   constructor(private readonly db: SqliteDatabase) {}
 
+  findById(id: string): DistillTaskRow | null {
+    const raw = this.db
+      .prepare<[string], RawRow>("SELECT * FROM distill_tasks WHERE id = ?")
+      .get(id)
+    return raw === undefined ? null : toRow(raw)
+  }
+
   /**
    * 入队一个任务；同 `(facet, scope, scope_ref, window)` 已存在则**不动它**。
    *
@@ -195,6 +202,18 @@ export class DistillTaskRepository {
       .prepare(
         `UPDATE distill_tasks SET state = 'running', attempts = attempts + 1, updated_at = ?
           WHERE id = ?`,
+      )
+      .run(at, id)
+  }
+
+  /** 外部租约被用户撤回时，让运行中的任务立即回到可领取状态。 */
+  markPending(id: string, at: number): void {
+    this.db
+      .prepare(
+        `UPDATE distill_tasks
+            SET state = 'pending', attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                last_error = NULL, updated_at = ?
+          WHERE id = ? AND state = 'running'`,
       )
       .run(at, id)
   }

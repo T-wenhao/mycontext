@@ -41,6 +41,7 @@ import {
   ALL_FACETS,
   DistillRunner,
   decideWorkRefresh,
+  EXTERNAL_DISTILL_FACET,
   inducePlaybooks,
   readPlaybookChunks,
   renderWorkLayer,
@@ -237,6 +238,8 @@ export interface DistillServiceOptions {
    * 可选：单测不关心这条通知。
    */
   onCorpusReady?: () => void
+  /** 用户明确启用外部 worker 后，把新规划的 T01 任务发布出去。 */
+  onExternalInferenceTasksPlanned?: () => void
   clock: Clock
   logger: Logger
   /** provider.get() 为 null 时只跑统计型任务（抽取型显式报错，不静默产 0 条） */
@@ -381,6 +384,8 @@ export interface DistillServiceOptions {
    * 不给 = 关。**默认必须是关**：这一层开着就是在后台静默花钱。
    */
   llmFacets?: () => boolean
+  /** 外部模式不调用本地模型，首期只规划 `tasks`。 */
+  externalInferenceOnly?: () => boolean
 }
 
 /** `runForge` 回调的返回：与 `ForgeRunResult` 同形，但不依赖那个模块。 */
@@ -522,6 +527,11 @@ export class DistillService {
    */
   private get workLayerOn(): boolean {
     return this.options.llmFacets?.() === true
+  }
+
+  /** 外部模式必须显式启用，并与本地模型开关保持独立。 */
+  private get externalInferenceOnlyOn(): boolean {
+    return this.options.externalInferenceOnly?.() === true
   }
 
   attach(
@@ -1028,9 +1038,10 @@ export class DistillService {
      * 只读的 `progress()` 里删库是超出它职责的副作用 —— 而且删掉之后
      * 万一有人重新打开 `llmFacets`，那些窗口就得重新切一遍。
      */
-    const counts = this.workLayerOn
-      ? raw
-      : { ...raw, total: 0, pending: 0, running: 0, done: 0, failed: 0, skipped: 0 }
+    const counts =
+      this.workLayerOn || this.externalInferenceOnlyOn
+        ? raw
+        : { ...raw, total: 0, pending: 0, running: 0, done: 0, failed: 0, skipped: 0 }
     return {
       ...counts,
       /**
@@ -1095,6 +1106,17 @@ export class DistillService {
     return [...scope.allow]
   }
 
+  /** 外部宿主每次领取时现读的会话范围。 */
+  externalInferenceConversationScope(): {
+    restricted: boolean
+    allow: readonly string[]
+  } {
+    const db = this.db
+    if (db === null) return { restricted: true, allow: [] }
+    const scope = readCollectionScope(db)
+    return { restricted: scope.restricted, allow: [...scope.allow] }
+  }
+
   /**
    * 定时轮里的 work 层：**先过攒批判据，再决定要不要花钱**。
    *
@@ -1155,14 +1177,15 @@ export class DistillService {
         required: false,
       })
       const latestSeq = new ChangelogRepository(db).head()
+      const externalInferenceOnly = this.externalInferenceOnlyOn
       const decision = decideWorkRefresh({
         latestSeq,
         lastRunSeq: cursor.ackedSeq,
         lastRunAt: cursor.lastSuccessAt,
         now: this.options.clock.now(),
         artifactExists: this.workArtifactExists?.() ?? false,
-        enabled: this.workLayerOn,
-        llmReady: this.options.llmProvider.get() !== null,
+        enabled: externalInferenceOnly || this.workLayerOn,
+        llmReady: externalInferenceOnly || this.options.llmProvider.get() !== null,
         consecutiveFailures: this.workFailures,
         lastFailureAt: this.workLastFailureAt,
       })
@@ -1306,7 +1329,20 @@ export class DistillService {
         return
       }
       const until = this.options.clock.now()
-      runner.plan({ since: this.plannedSince, until, windowDays: WORK_WINDOW_DAYS })
+      runner.plan({
+        since: this.plannedSince,
+        until,
+        windowDays: WORK_WINDOW_DAYS,
+        ...(externalInferenceOnly ? { facets: [EXTERNAL_DISTILL_FACET] } : {}),
+      })
+      if (externalInferenceOnly) {
+        this.options.onExternalInferenceTasksPlanned?.()
+        this.options.logger.info("work layer planned for external inference", {
+          facet: EXTERNAL_DISTILL_FACET,
+          directModelCalls: 0,
+        })
+        return
+      }
       /**
        * 跑到排空。每个任务自己是一次事务边界（失败只标自己），所以这里
        * 只需要一个"还认领得到活吗"的循环。
@@ -1793,6 +1829,14 @@ export class DistillService {
   private requireDb(): SqliteDatabase {
     if (this.db === null) throw new AppError("DB_UNAVAILABLE", "尚未登录")
     return this.db
+  }
+
+  /**
+   * 给宿主侧 External Inference adapter 同步当前 vault 的脱敏守卫。
+   * 未挂载 vault 时返回空集；adapter 本身仍只在有 vault 时启动。
+   */
+  externalInferenceForbiddenTerms(): readonly string[] {
+    return this.db === null ? [] : this.forbiddenTerms(this.db)
   }
 
   /**

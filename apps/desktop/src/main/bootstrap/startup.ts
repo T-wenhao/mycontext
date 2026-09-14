@@ -78,6 +78,7 @@ import { DashboardTrendsService } from "../services/dashboard-trends.service.js"
 import { MultiGraphQueryService } from "../services/multi-graph-query.service.js"
 import { AdvancedAiService } from "../services/advanced-ai.service.js"
 import { RuntimeConfigService } from "../services/runtime-config.service.js"
+import { ExternalInferenceService } from "../services/external-inference.service.js"
 import { SecretStore } from "../services/secret-store.js"
 import { PreferencesService } from "../services/preferences.service.js"
 import { ScryptPasswordHasher } from "../services/password-hasher.js"
@@ -101,6 +102,8 @@ export interface AppContext {
   distillSources: DistillSourceService
   /** 蒸馏执行（切窗 + 跑任务 + 进度推送） */
   distill: DistillService
+  /** 外部推理 worker：loopback MCP + vault 级任务宿主 */
+  externalInference: ExternalInferenceService
   forge: ForgeService
   /** 数字人管控层接线 */
   persona: PersonaService
@@ -904,6 +907,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     localeId: resolveLanguage(preferences.language(), app.getLocale()) === "en" ? "en" : "zh-CN",
   })
 
+  const externalInferenceRef: { current: ExternalInferenceService | null } = { current: null }
   const distill = new DistillService({
     clock: systemClock,
     logger: logger.child("Distill"),
@@ -941,6 +945,10 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 蒸馏的收尾。`tickGraphSync` 自己有 `inFlightSync` 挡并发。
      */
     onCorpusReady: () => void feed.tickGraphSync(),
+    onExternalInferenceTasksPlanned: () => {
+      externalInferenceRef.current?.publishPending()
+    },
+    externalInferenceOnly: () => externalInferenceRef.current?.isExternalOnly() === true,
     /**
      * ★★ 工作层抽取的开关 —— 这就是让 work 层从"代码写好了"变成"真的会跑"
      * 的那一行。
@@ -996,6 +1004,15 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     graphBusy: () => klServer.status().building,
   })
+
+  const externalInference = new ExternalInferenceService({
+    clock: systemClock,
+    logger: logger.child("ExternalInference"),
+    getForbiddenTerms: () => distill.externalInferenceForbiddenTerms(),
+    getConversationScope: () => distill.externalInferenceConversationScope(),
+    onExternalOnlyEnabled: () => void distill.refreshWorkLayer(),
+  })
+  externalInferenceRef.current = externalInference
 
   /**
    * kl-server 端口：KlServerService 起在这里，两条 agent 路径（SearchService
@@ -2110,6 +2127,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       distillSources,
       search,
       media,
+      externalInference,
       distill,
       persona,
       klServer,
@@ -2412,6 +2430,23 @@ export function bootstrapApp(mainDir: string): AppContext {
        */
       () => readForgeWorkContext(vp.forgeRoot),
     )
+    /**
+     * External Inference 只在已绑定身份的 vault 上开放：它会把当前任务的
+     * 有界语料交给 loopback worker，未绑定时不应有可领取的工作。
+     * 交接清单放在应用级 userData 而非 vault 内，避免向 worker 暴露 vault 路径；
+     * server 停在 vault teardown 之前，避免 worker 在关库期间继续提交。
+     */
+    if (dataFlowsAllowed) {
+      await externalInference
+        .attach(handle.db, join(paths.userData, "external-inference", "handoff.json"))
+        .catch((error: unknown) => {
+          logger.error("external inference attach failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        })
+    } else {
+      await externalInference.detach()
+    }
     /**
      * agent 的三个目录：workspace 与 HOME 按 vault，npm 缓存应用级一份。
      *
@@ -2916,6 +2951,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     onboarding,
     distillSources,
     distill,
+    externalInference,
     persona,
     media,
     mediaByChannel,
@@ -2951,6 +2987,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     onboarding,
     distillSources,
     distill,
+    externalInference,
     forge,
     persona,
     media,
@@ -3004,6 +3041,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       // 先优雅收掉 opencode（撤 token + kill 进程，无孤儿），再 detach。
       await runShutdownStep(runner, "search", () => search.shutdown())
       search.detach()
+      await runShutdownStep(runner, "externalInference", () => externalInference.detach())
       await runShutdownStep(runner, "distill", () => distill.detach())
       await runShutdownStep(runner, "persona", () => persona.detach())
       // kl 子进程同样优雅停（SIGTERM→SIGKILL，无孤儿）。

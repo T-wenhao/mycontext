@@ -71,6 +71,7 @@
       "database": "数据库（已应用迁移 v{{version}}）",
       "config": "配置注入",
       "dataPlane": "数据面",
+      "externalInference": "外部推理",
       "kl": "知识图谱（kl）"
     },
     "runtime": {
@@ -150,6 +151,21 @@
         "dingtalk": "钉钉",
         "feishu": "飞书"
       }
+    },
+    "externalInference": {
+      "description": "把高开销蒸馏交给你选择的本机 Agent；MyContext 只提供有界语料，并负责校验和写入。不会自动回退到付费模型。",
+      "loading": "正在读取外部任务状态…",
+      "unavailable": "外部推理服务尚未挂载。",
+      "enabled": "仅外部执行",
+      "disabled": "未启用",
+      "prepare": "准备交接清单",
+      "stop": "停止并撤销",
+      "pending": "待领取",
+      "leased": "执行中",
+      "committed": "已提交",
+      "failed": "失败",
+      "handoffPath": "交接清单",
+      "handoffHint": "只把这个清单路径交给你选择的 Agent；停止后凭据与在途租约会立即撤销。"
     },
     "topology": {
       "title": "数据平面",

@@ -60,6 +60,13 @@ export type { FacetRow, MergeResult, MergeRelation } from "./reduce/merger.js"
 export { facetKey, candidateKey, findSimilar, similarity, overlap } from "./reduce/dedupe.js"
 export type { ExistingFacet } from "./reduce/dedupe.js"
 
+export {
+  ExternalInferenceDistillHost,
+  EXTERNAL_DISTILL_FACET,
+  EXTERNAL_DISTILL_TASK_PROMPT_VERSION,
+} from "./external-inference.js"
+export type { ExternalInferenceDistillHostOptions } from "./external-inference.js"
+
 /**
  * Materializer 只剩入口文件。
  *

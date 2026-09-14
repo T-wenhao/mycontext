@@ -97,6 +97,7 @@ const DATA_TABLES = [
   "dh_agent_sessions",
 
   // 蒸馏产物与任务（画像可从语料重建，语料正在被清）
+  "external_inference_jobs",
   "distill_tasks",
   "profile_facet_revisions",
   "profile_facets",

@@ -128,6 +128,8 @@ export interface PlanInput {
    * 而那一层免费。
    */
   windowDays?: number
+  /** 显式限制本轮规划的 facet；外部首期只用 `tasks`。 */
+  facets?: readonly string[]
 }
 
 export interface TaskRunResult {
@@ -206,9 +208,10 @@ export class DistillRunner {
 
     let created = 0
     let total = 0
+    const facets = input.facets ?? ALL_FACETS
     for (let start = earliest; start < input.until; start += windowMs) {
       const end = Math.min(start + windowMs, input.until)
-      for (const facet of ALL_FACETS) {
+      for (const facet of facets) {
         total += 1
         const inserted = this.tasks.enqueue(
           {
