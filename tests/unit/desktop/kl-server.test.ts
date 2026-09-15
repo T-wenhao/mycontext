@@ -1206,6 +1206,37 @@ describe("KlServerService · 建图（rebuildGraph 走 server 的 /ingest）", (
   })
 
   /**
+   * 当前 kl-server 把图规模放在 `knowledge`，旧客户端读取的是 `sqlite`。
+   * 这会把真实的 820 条事实误报成 0，并把成功建图判成空图失败。
+   */
+  it("读取当前 /status 的 knowledge 图规模", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ingest: { state: "done", phase: "complete", percent: 1 },
+        knowledge: { entities: 480, facts: 820, edges: 5_361 },
+      }),
+    } as Response)
+    const svc = makeService({
+      runner: fakeRunner(),
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      exportDir: "/tmp/exports/dws",
+      postIngest: async () => 200,
+    })
+
+    const result = await svc.rebuildGraph(false)
+
+    expect(result).toMatchObject({
+      ok: true,
+      entities: 480,
+      facts: 820,
+      edges: 5_361,
+    })
+  })
+
+  /**
    * ★ 重建（fresh=true）：先把 knowledge.db / qdrant_data / extraction_cache 删掉再跑，
    * 否则抽取缓存（key=md5(msg.id)）会命中旧结果，达不到"重抽"的意图。
    */
@@ -1287,6 +1318,45 @@ describe("KlServerService · 建图（rebuildGraph 走 server 的 /ingest）", (
     })
     await svc.rebuildGraph(false)
     expect(existsSync(join(dataDir, "knowledge.db"))).toBe(true)
+  })
+
+  /**
+   * ★★ Windows 上 SQLite / mmap 文件偶尔仍被占用，`wipeGraphData()` 会抛
+   * `EPERM`。这条异常发生在真正 ingest 之前，但绝不能把会话内互斥锁永久
+   * 留在 `building=true` —— 否则 KL 明明 idle，后续每一轮都只会得到
+   * 「建图已在进行中」。
+   */
+  it("清库抛 EPERM 后释放 building，下一轮仍可建图", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const exportDir = mkdtempSync(join(tmpdir(), "mycontext-kl-wipe-error-export-"))
+    dirs.push(exportDir)
+    mkdirSync(join(exportDir, "chat"), { recursive: true })
+    writeFileSync(join(exportDir, "chat", "records.jsonl"), '{"id":"m1"}\n')
+
+    const svc = makeService({
+      runner: fakeRunner(),
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      exportDir,
+      gateway: () => ({ llmBaseUrl: "https://gw", apiKey: "sk-x" }),
+      postIngest: async () => 200,
+      readStatus: async () => snap(),
+    })
+    vi.spyOn(
+      svc as unknown as { wipeGraphData: () => void },
+      "wipeGraphData",
+    ).mockImplementationOnce(() => {
+      throw Object.assign(new Error("EPERM, Permission denied: knowledge.db"), { code: "EPERM" })
+    })
+
+    const failed = await svc.rebuildGraph(true)
+    expect(failed.ok).toBe(false)
+    expect(failed.reason).toContain("EPERM")
+    expect(svc.status().building).toBe(false)
+
+    const retry = await svc.rebuildGraph(false)
+    expect(retry.ok).toBe(true)
+    expect(retry.reason).toBeNull()
   })
 })
 
