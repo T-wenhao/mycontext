@@ -47,7 +47,7 @@
  * 两个调用方都已经有标题（设置页的 `Section` / onboarding 的页标题）。
  * 再挂一层就是同一件事说三四遍 —— 标题的责任留给容器。
  */
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import { Button, Disclosure, Field, Input, Switch, Tag, cn } from "@mycontext/design"
 import {
   DEFAULT_EMBEDDING_DIM,
@@ -110,6 +110,14 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [embedSendDims, setEmbedSendDims] = useState<boolean | null>(null)
   /** 模型名手输模式（探测列表里没有想要的那个时） */
   const [customModel, setCustomModel] = useState(false)
+  /**
+   * embedding 也必须能手输。
+   *
+   * 自建服务的模型 id 往往不在主网关 `/models` 里；原来这里没有「其它」入口，
+   * 界面只剩 `text-embedding-v4` 一个可点档位，用户为了保存其它模型配置时很容易
+   * 把它一并写回数据库。与主模型分开记草稿，避免切主模型时碰到 embedding。
+   */
+  const [customEmbedModel, setCustomEmbedModel] = useState(false)
   /**
    * 探测是**针对哪组凭据**跑的。
    *
@@ -187,6 +195,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
         setModelMain(null)
         setMainProvider(null)
         setEmbedModel(null)
+        setCustomEmbedModel(false)
         setEmbedBaseUrl(null)
         setEmbedApiKey("")
         setEmbedDimText(null)
@@ -414,8 +423,22 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
               embedOptions.length > 0 ? embedOptions : (SUGGESTED_EMBED as readonly string[])
             }
             value={embedValue}
-            onPick={(next) => setEmbedModel(next)}
+            onPick={(next) => {
+              setEmbedModel(next)
+              setCustomEmbedModel(false)
+            }}
+            otherLabel={t("model.other")}
+            custom={customEmbedModel || !embedOptions.includes(embedValue)}
+            onCustom={() => setCustomEmbedModel(true)}
           />
+          {(customEmbedModel || !embedOptions.includes(embedValue)) && (
+            <Input
+              aria-label={t("model.embed.customModel")}
+              value={embedValue}
+              onChange={(event) => setEmbedModel(event.target.value)}
+              placeholder="qwen3-embedding-4b"
+            />
+          )}
           {/*
             ★ 探测成功、拿到了真实列表、而列表里**一个 embedding 模型都没有** → 明说。
             实测遇到过这种网关：`/models` 12 个模型全是 chat/image/audio，
@@ -600,6 +623,171 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
           </Tag>
         )}
       </div>
+
+      {/*
+        ★★ 这里展示 RuntimeConfigService 已解析完所有层级后的值，不复用状态页的
+        LoadedConfig 表。后者只知道「内置默认 / .env / 环境变量」，不知道数据库
+        用户覆盖，正是 `text-embedding-v4` 看起来像最终值的根因。
+
+        摘要刻意只读 `current`，不把未保存草稿算进去：标题与说明都写明「已保存」，
+        用户点保存、query 失效并重读主进程之后，这里才变化，因此不会给假反馈。
+      */}
+      <EffectiveConfigSummary config={current} />
+    </div>
+  )
+}
+
+type RuntimeFieldSource = RuntimeConfigView["embedModel"]["source"]
+type EffectiveFieldSource = RuntimeFieldSource | "inheritedMain" | "inheritedKl"
+
+/** 主进程解析后的三条真实调用路径；密钥永远只显示可用/不可用。 */
+function EffectiveConfigSummary({ config }: { config: RuntimeConfigView }) {
+  const { t } = useDynamicTranslation("settings")
+  const klBaseSource: EffectiveFieldSource =
+    config.klLlmBaseUrl.value.trim() === "" ? "inheritedMain" : config.klLlmBaseUrl.source
+  const klModelSource: EffectiveFieldSource =
+    config.klModelMain.value.trim() === "" ? "inheritedMain" : config.klModelMain.source
+  const klKeySource: EffectiveFieldSource =
+    config.klLlmApiKey.configured || config.klLlmApiKey.source !== "default"
+      ? config.klLlmApiKey.source
+      : "inheritedMain"
+  const embedBaseSource: EffectiveFieldSource =
+    config.embedBaseUrl.value.trim() === "" ? "inheritedKl" : config.embedBaseUrl.source
+  const embedKeySource: EffectiveFieldSource =
+    config.embedApiKey.source === "user" ? "user" : "inheritedKl"
+
+  return (
+    <section
+      aria-label={t("model.effective.title")}
+      className="flex flex-col gap-[var(--gap-section-sm)] rounded-[var(--radius-lg)] border border-[var(--border-light)] bg-[var(--bg-card-z0)] p-4"
+    >
+      <div className="flex flex-col gap-1">
+        <h3 className="typography-title-small-500 text-[var(--text-base-primary)]">
+          {t("model.effective.title")}
+        </h3>
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("model.effective.hint")}
+        </p>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <EffectiveRouteCard title={t("model.effective.main")}>
+          <EffectiveConfigLine
+            label={t("model.effective.endpoint")}
+            value={config.llmBaseUrl.value}
+            source={config.llmBaseUrl.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.model")}
+            value={config.modelMain.value}
+            source={config.modelMain.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.protocol")}
+            value={t(`model.provider.${config.mainProvider.value}`)}
+            source={config.mainProvider.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.key")}
+            value={t(config.llmApiKey.configured ? "model.keyOn" : "model.keyOff")}
+            source={config.llmApiKey.source}
+          />
+        </EffectiveRouteCard>
+
+        <EffectiveRouteCard title={t("model.effective.knowledge")}>
+          <EffectiveConfigLine
+            label={t("model.effective.endpoint")}
+            value={config.klEffective.baseUrl}
+            source={klBaseSource}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.model")}
+            value={config.klEffective.model}
+            source={klModelSource}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.protocol")}
+            value={t(`model.provider.${config.klEffective.provider}`)}
+            source={config.klProvider.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.key")}
+            value={t(config.klEffective.apiKeyConfigured ? "model.keyOn" : "model.keyOff")}
+            source={klKeySource}
+          />
+        </EffectiveRouteCard>
+
+        <EffectiveRouteCard title={t("model.effective.embedding")}>
+          <EffectiveConfigLine
+            label={t("model.effective.endpoint")}
+            value={config.klEffective.embedBaseUrl}
+            source={embedBaseSource}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.model")}
+            value={config.embedModel.value}
+            source={config.embedModel.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.dimension")}
+            value={String(config.embeddingDim.value)}
+            source={config.embeddingDim.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.sendDimensions")}
+            value={t(
+              config.embedSendDimensions.value ? "model.effective.send" : "model.effective.omit",
+            )}
+            source={config.embedSendDimensions.source}
+          />
+          <EffectiveConfigLine
+            label={t("model.effective.key")}
+            value={t(config.embedApiKey.configured ? "model.keyOn" : "model.keyOff")}
+            source={embedKeySource}
+          />
+        </EffectiveRouteCard>
+      </div>
+    </section>
+  )
+}
+
+function EffectiveRouteCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-2 rounded-[var(--radius-md)] bg-[var(--bg-card-z1)] p-3">
+      <h4 className="typography-body-small-400 font-medium text-[var(--text-base-primary)]">
+        {title}
+      </h4>
+      <dl className="flex flex-col gap-2">{children}</dl>
+    </div>
+  )
+}
+
+function EffectiveConfigLine({
+  label,
+  value,
+  source,
+}: {
+  label: string
+  value: string
+  source: EffectiveFieldSource
+}) {
+  const { t } = useDynamicTranslation("settings")
+  return (
+    <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-0.5">
+      <dt className="typography-caption-400 text-[var(--text-base-tertiary)]">{label}</dt>
+      <dd className="min-w-0 text-right">
+        <span
+          className="typography-caption-400 break-all text-[var(--text-base-secondary)]"
+          title={value || undefined}
+        >
+          {value || "—"}
+        </span>
+      </dd>
+      <dd className="col-start-2 flex justify-end">
+        <Tag size="sm" status="default">
+          {t(`model.effective.sources.${source}`)}
+        </Tag>
+      </dd>
     </div>
   )
 }
