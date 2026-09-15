@@ -115,6 +115,19 @@ export interface ResolvedRuntimeConfig {
   embedSendDimensions: boolean
 }
 
+/** kl-server 每次 spawn 真正收到的一份脱离 UI 形态的配置快照。 */
+export interface ResolvedKlGatewayConfig {
+  llmBaseUrl: string
+  llmProvider: ModelProvider
+  llmModel: string
+  embedBaseUrl: string
+  embedModel: string
+  apiKey: string
+  embedApiKey: string
+  embeddingDim: number
+  sendDimensions: boolean
+}
+
 /** 保存输入：字符串三态见 contract 的 saveRuntimeConfigInputSchema。 */
 export interface SaveRuntimeConfigPatch {
   llmBaseUrl?: string | undefined
@@ -172,6 +185,8 @@ type FieldSource = RuntimeConfigView["llmBaseUrl"]["source"]
 
 export class RuntimeConfigService {
   private readonly listeners = new Set<(resolved: ResolvedRuntimeConfig) => void>()
+  /** seed 前的真实环境值；GUI 清空时恢复，避免应用自己写入的别名反过来接管配置。 */
+  private readonly envBeforeSeed = new Map<string, string | undefined>()
 
   constructor(private readonly options: RuntimeConfigServiceOptions) {
     this.adoptLegacyIfNeeded()
@@ -180,6 +195,26 @@ export class RuntimeConfigService {
   /** 探测用的 fetch（测试可注入）。 */
   private get fetchImpl(): typeof fetch {
     return this.options.fetchImpl ?? globalThis.fetch.bind(globalThis)
+  }
+
+  private envValue(...keys: string[]): string {
+    const env = this.options.env ?? process.env
+    for (const key of keys) {
+      const value = env[key]?.trim() ?? ""
+      if (value !== "") return value
+    }
+    return ""
+  }
+
+  private restoreSeededEnv(...keys: string[]): void {
+    const env = this.options.env ?? process.env
+    for (const key of keys) {
+      if (!this.envBeforeSeed.has(key)) continue
+      const original = this.envBeforeSeed.get(key)
+      if (original === undefined) delete env[key]
+      else env[key] = original
+      this.envBeforeSeed.delete(key)
+    }
   }
 
   /** 明文解析结果。进程内消费者（LlmHolder、kl gateway getter）用它。 */
@@ -192,8 +227,14 @@ export class RuntimeConfigService {
       return trimmed !== "" ? trimmed : fallback
     }
 
-    const llmBaseUrl = pick(stored.llmBaseUrl, d.llmBaseUrl)
-    const llmApiKey = this.options.secretStore.read(LLM_API_KEY_SECRET) ?? d.llmApiKey
+    const configuredLlmBaseUrl = pick(stored.llmBaseUrl, d.llmBaseUrl)
+    const llmBaseUrl =
+      configuredLlmBaseUrl !== "" ? configuredLlmBaseUrl : this.envValue("ANTHROPIC_BASE_URL")
+    const configuredLlmApiKey = this.options.secretStore.read(LLM_API_KEY_SECRET) ?? d.llmApiKey
+    const llmApiKey =
+      configuredLlmApiKey.trim() !== ""
+        ? configuredLlmApiKey
+        : this.envValue("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
     const modelMain = pick(stored.modelMain, d.modelMain)
     const mainProvider: ModelProvider = stored.mainProvider ?? d.modelProvider
     const embedModel = pick(stored.embedModel, d.embedModel)
@@ -209,21 +250,37 @@ export class RuntimeConfigService {
      */
     const klProvider: ModelProvider = stored.klProvider ?? d.klProvider
 
-    const klBaseUrl = klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl
+    const klBaseUrl =
+      klBaseRaw.trim() !== ""
+        ? klBaseRaw
+        : llmBaseUrl.trim() !== ""
+          ? llmBaseUrl
+          : this.envValue("KL_LLM_BASE_URL")
     /**
      * ★ embedding 地址：用户单独填的优先，否则沿用 KL 地址 —— 后者是改动前
      * 那句 `openAiEmbedBaseUrl(base)` 的原样保留，所以没动过这一项的用户
      * 完全感知不到这次改动。两条分支都过归一化（用户手填也会带不带 `/v1`）。
      */
     const embedBaseRaw = stored.embedBaseUrl?.trim() ?? ""
-    const embedBaseUrl = openAiEmbedBaseUrl(embedBaseRaw !== "" ? embedBaseRaw : klBaseUrl)
+    const embedBaseUrl = openAiEmbedBaseUrl(
+      embedBaseRaw !== ""
+        ? embedBaseRaw
+        : klBaseUrl.trim() !== ""
+          ? klBaseUrl
+          : this.envValue("KL_EMBED_BASE_URL"),
+    )
     /**
      * ★ embedding 密钥与地址**同构回退**：用户单独填的优先，否则沿用 KL 那把
      * （改动前的唯一行为）。两者各自独立回退是刻意的 —— 有人会"换 host 但
      * 复用同一把 key"（同一家的另一个域名），也有人"同 host 不同 key"。
      * 绑成一体的话其中一种就表达不出来。
      */
-    const klApiKey = klApiRaw.trim() !== "" ? klApiRaw : llmApiKey
+    const klApiKey =
+      klApiRaw.trim() !== ""
+        ? klApiRaw
+        : llmApiKey.trim() !== ""
+          ? llmApiKey
+          : this.envValue(klProvider === "anthropic" ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY")
     const embedKeyRaw = this.options.secretStore.read(EMBED_API_KEY_SECRET) ?? ""
 
     return {
@@ -237,9 +294,34 @@ export class RuntimeConfigService {
       klModel: klModelRaw.trim() !== "" ? klModelRaw : modelMain,
       klProvider,
       embedBaseUrl,
-      embedApiKey: embedKeyRaw.trim() !== "" ? embedKeyRaw : klApiKey,
+      embedApiKey:
+        embedKeyRaw.trim() !== ""
+          ? embedKeyRaw
+          : klApiKey.trim() !== ""
+            ? klApiKey
+            : this.envValue("KL_EMBED_API_KEY"),
       embeddingDim: stored.embeddingDim ?? DEFAULT_EMBEDDING_DIM,
       embedSendDimensions: stored.embedSendDimensions ?? DEFAULT_EMBED_SEND_DIMENSIONS,
+    }
+  }
+
+  /**
+   * GUI 的最终摘要与 kl-server 启动都必须读这一份，避免启动层再叠隐藏覆盖。
+   * `KL_LLM_MODEL` 不在这里另开优先级；开发者应使用受配置系统追踪来源的
+   * `MYCONTEXT_KL_MODEL_MAIN`，而 GUI 保存值始终优先于默认层。
+   */
+  resolvedKlGateway(): ResolvedKlGatewayConfig {
+    const resolved = this.resolved()
+    return {
+      llmBaseUrl: resolved.klBaseUrl,
+      llmProvider: resolved.klProvider,
+      llmModel: resolved.klModel,
+      embedBaseUrl: resolved.embedBaseUrl,
+      embedModel: resolved.embedModel,
+      apiKey: resolved.klApiKey,
+      embedApiKey: resolved.embedApiKey,
+      embeddingDim: resolved.embeddingDim,
+      sendDimensions: resolved.embedSendDimensions,
     }
   }
 
@@ -248,6 +330,7 @@ export class RuntimeConfigService {
     const stored = this.readStored()
     const d = this.options.defaults
     const resolved = this.resolved()
+    const gateway = this.resolvedKlGateway()
 
     const plain = (
       override: string | undefined,
@@ -279,33 +362,102 @@ export class RuntimeConfigService {
       }
     }
 
+    const llmBaseUrl = plain(stored.llmBaseUrl, "llmBaseUrl")
+    if (llmBaseUrl.value.trim() === "" && resolved.llmBaseUrl !== "") {
+      llmBaseUrl.value = resolved.llmBaseUrl
+      llmBaseUrl.source = "env"
+    }
+    const llmApiKey = secret(LLM_API_KEY_SECRET, "llmApiKey")
+    if (!llmApiKey.configured && resolved.llmApiKey !== "") {
+      llmApiKey.configured = true
+      llmApiKey.source = "env"
+    }
+    const modelMain = plain(stored.modelMain, "modelMain")
+    const mainProvider = {
+      value: resolved.mainProvider,
+      source: stored.mainProvider !== undefined ? "user" : this.defaultSource("modelProvider"),
+    } as const
+    const embedModel = plain(stored.embedModel, "embedModel")
+    const klLlmBaseUrl = plain(stored.klLlmBaseUrl, "klLlmBaseUrl")
+    const klLlmApiKey = secret(KL_API_KEY_SECRET, "klLlmApiKey")
+    const klModelMain = plain(stored.klModelMain, "klModelMain")
+    const klProvider = {
+      value: resolved.klProvider,
+      source: stored.klProvider !== undefined ? "user" : this.defaultSource("klProvider"),
+    } as const
+    const embedBaseUrl = {
+      value: stored.embedBaseUrl ?? "",
+      source: stored.embedBaseUrl !== undefined ? ("user" as const) : ("default" as const),
+    }
+    const ownEmbedKey = this.options.secretStore.read(EMBED_API_KEY_SECRET)
+    const embedApiKey =
+      ownEmbedKey !== null && ownEmbedKey !== ""
+        ? {
+            configured: true,
+            tail: ownEmbedKey.length >= 4 ? ownEmbedKey.slice(-4) : null,
+            source: "user" as const,
+          }
+        : {
+            configured: gateway.embedApiKey !== "",
+            tail: null,
+            source: "default" as const,
+          }
+    const embeddingDim = {
+      value: resolved.embeddingDim,
+      source: stored.embeddingDim !== undefined ? ("user" as const) : ("default" as const),
+    }
+    const embedSendDimensions = {
+      value: resolved.embedSendDimensions,
+      source: stored.embedSendDimensions !== undefined ? ("user" as const) : ("default" as const),
+    }
+
+    const klBaseSource =
+      klLlmBaseUrl.value.trim() !== ""
+        ? klLlmBaseUrl.source
+        : llmBaseUrl.value.trim() !== ""
+          ? ("inheritedMain" as const)
+          : ("env" as const)
+    const klModelSource =
+      klModelMain.value.trim() !== "" ? klModelMain.source : ("inheritedMain" as const)
+    const klKeySource = klLlmApiKey.configured
+      ? klLlmApiKey.source
+      : llmApiKey.configured
+        ? ("inheritedMain" as const)
+        : gateway.apiKey !== ""
+          ? ("env" as const)
+          : ("inheritedMain" as const)
+    const embedBaseSource =
+      embedBaseUrl.value.trim() !== ""
+        ? embedBaseUrl.source
+        : gateway.llmBaseUrl !== ""
+          ? ("inheritedKl" as const)
+          : ("env" as const)
+    const embedKeySource =
+      embedApiKey.source === "user"
+        ? ("user" as const)
+        : gateway.apiKey !== ""
+          ? ("inheritedKl" as const)
+          : gateway.embedApiKey !== ""
+            ? ("env" as const)
+            : ("inheritedKl" as const)
+
     return {
-      llmBaseUrl: plain(stored.llmBaseUrl, "llmBaseUrl"),
-      llmApiKey: secret(LLM_API_KEY_SECRET, "llmApiKey"),
-      modelMain: plain(stored.modelMain, "modelMain"),
-      mainProvider: {
-        value: resolved.mainProvider,
-        source: stored.mainProvider !== undefined ? "user" : this.defaultSource("modelProvider"),
-      },
-      embedModel: plain(stored.embedModel, "embedModel"),
-      klLlmBaseUrl: plain(stored.klLlmBaseUrl, "klLlmBaseUrl"),
-      klLlmApiKey: secret(KL_API_KEY_SECRET, "klLlmApiKey"),
-      klModelMain: plain(stored.klModelMain, "klModelMain"),
-      klProvider: {
-        value: resolved.klProvider,
-        // 存了就是用户覆盖，否则来源同其它默认层字段（env/dotenv/default）。
-        source: stored.klProvider !== undefined ? "user" : this.defaultSource("klProvider"),
-      },
+      llmBaseUrl,
+      llmApiKey,
+      modelMain,
+      mainProvider,
+      embedModel,
+      klLlmBaseUrl,
+      klLlmApiKey,
+      klModelMain,
+      klProvider,
       /**
        * ★ embedding 三项**没有默认层**（见 `StoredOverrides` 里那段注释）——
        * 存了就 `user`，没存就 `default`（内置常量 / 沿用 KL 地址）。
        * 不走 `plain()`：那个 helper 的回退取 `d.values[key]`，而这三项在
        * kernel 配置里根本没有对应键。
        */
-      embedBaseUrl: {
-        value: stored.embedBaseUrl ?? "",
-        source: stored.embedBaseUrl !== undefined ? "user" : "default",
-      },
+      embedBaseUrl,
       /**
        * ★ embedding 密钥同样没有默认层：填过就 `user`（给后 4 位），
        * 没填过就 `default` + `configured` 表示**回退的那把**在不在。
@@ -314,36 +466,28 @@ export class RuntimeConfigService {
        * 而不是"这个槽位有没有填" —— 后者由 `source` 表达。这样 UI 上
        * "未配置"就只在**真的一把都没有**时出现，不会在"跟随 KL"时误报。
        */
-      embedApiKey: (() => {
-        const own = this.options.secretStore.read(EMBED_API_KEY_SECRET)
-        if (own !== null && own !== "") {
-          return {
-            configured: true,
-            tail: own.length >= 4 ? own.slice(-4) : null,
-            source: "user" as FieldSource,
-          }
-        }
-        // 没单独填 → 报回退后那把在不在；不回显它的后 4 位（那是 KL 那把的）
-        return {
-          configured: resolved.embedApiKey !== "",
-          tail: null,
-          source: "default" as FieldSource,
-        }
-      })(),
-      embeddingDim: {
-        value: resolved.embeddingDim,
-        source: stored.embeddingDim !== undefined ? "user" : "default",
-      },
-      embedSendDimensions: {
-        value: resolved.embedSendDimensions,
-        source: stored.embedSendDimensions !== undefined ? "user" : "default",
-      },
+      embedApiKey,
+      embeddingDim,
+      embedSendDimensions,
       klEffective: {
-        baseUrl: resolved.klBaseUrl,
-        model: resolved.klModel,
-        apiKeyConfigured: resolved.klApiKey !== "",
-        provider: resolved.klProvider,
-        embedBaseUrl: resolved.embedBaseUrl,
+        baseUrl: gateway.llmBaseUrl,
+        baseUrlSource: klBaseSource,
+        model: gateway.llmModel,
+        modelSource: klModelSource,
+        apiKeyConfigured: gateway.apiKey !== "",
+        apiKeySource: klKeySource,
+        provider: gateway.llmProvider,
+        providerSource: klProvider.source,
+        embedBaseUrl: gateway.embedBaseUrl,
+        embedBaseUrlSource: embedBaseSource,
+        embedModel: gateway.embedModel,
+        embedModelSource: embedModel.source,
+        embedApiKeyConfigured: gateway.embedApiKey !== "",
+        embedApiKeySource: embedKeySource,
+        embeddingDim: gateway.embeddingDim,
+        embeddingDimSource: embeddingDim.source,
+        sendDimensions: gateway.sendDimensions,
+        sendDimensionsSource: embedSendDimensions.source,
       },
     }
   }
@@ -398,6 +542,14 @@ export class RuntimeConfigService {
     this.writeSecret(LLM_API_KEY_SECRET, patch.llmApiKey)
     this.writeSecret(KL_API_KEY_SECRET, patch.klLlmApiKey)
     this.writeSecret(EMBED_API_KEY_SECRET, patch.embedApiKey)
+
+    // GUI 显式清空时先撤销本服务早先 seed 的别名，再解析回退层。
+    if (patch.llmBaseUrl !== undefined && patch.llmBaseUrl.trim() === "") {
+      this.restoreSeededEnv("MYCONTEXT_LLM_BASE_URL", "ANTHROPIC_BASE_URL")
+    }
+    if (patch.llmApiKey === null || patch.llmApiKey?.trim() === "") {
+      this.restoreSeededEnv("MYCONTEXT_LLM_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    }
 
     this.seedProcessEnv()
 
@@ -659,7 +811,9 @@ export class RuntimeConfigService {
     const env = this.options.env ?? process.env
     const resolved = this.resolved()
     const set = (key: string, value: string): void => {
-      if (value.trim() !== "") env[key] = value
+      if (value.trim() === "") return
+      if (!this.envBeforeSeed.has(key)) this.envBeforeSeed.set(key, env[key])
+      env[key] = value
     }
     set("MYCONTEXT_LLM_BASE_URL", resolved.llmBaseUrl)
     set("MYCONTEXT_LLM_API_KEY", resolved.llmApiKey)

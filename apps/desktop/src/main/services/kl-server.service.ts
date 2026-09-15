@@ -2687,6 +2687,26 @@ export class KlServerService {
 
     const gw = this.options.gateway?.()
     if (gw !== undefined) {
+      /**
+       * `gateway()` 已是 GUI 与启动共用的最终快照；先清掉父进程里残留的旧值，
+       * 才能保证空值也真的生效。否则用户清空某项后，复制自 `process.env` 的
+       * `KL_*` 或协议密钥仍会悄悄接管子进程。
+       */
+      for (const key of [
+        "KL_LLM_BASE_URL",
+        "KL_LLM_MODEL",
+        "KL_LLM_PROVIDER",
+        "KL_LLM_FLASH_PROVIDER",
+        "KL_EMBED_BASE_URL",
+        "KL_EMBED_MODEL",
+        "KL_EMBED_API_KEY",
+        "KL_EMBEDDING_DIM",
+        "KL_EMBED_SEND_DIMENSIONS",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+      ]) {
+        delete env[key]
+      }
       // LLM：传**裸模型名**与 base，协议由 KL_LLM_PROVIDER 声明 —— kl 侧的
       // litellm_config.py 按 provider 规整 base（anthropic 剥 /v1、openai 补一个 /v1）
       // 并拼出对的 provider 前缀。见下面 KL_LLM_PROVIDER 的注释。

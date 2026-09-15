@@ -17,8 +17,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ManualClock, createLogger } from "@mycontext/kernel"
 import { LlmClient, staticLlmProvider } from "@mycontext/llm"
-import { DistillService, type ForgeRunOutcome } from "@main/services/distill.service.js"
-import { ChangelogRepository, ConversationRepository, MessageRepository } from "@mycontext/store"
+import {
+  DistillService,
+  WORK_CONSUMER_ID,
+  type ForgeRunOutcome,
+} from "@main/services/distill.service.js"
+import { ExternalInferenceDistillHost } from "@mycontext/distill"
+import {
+  ChangelogRepository,
+  ConsumerCursorRepository,
+  ConversationRepository,
+  MessageRepository,
+} from "@mycontext/store"
 import { openTestVault } from "../../helpers/vault.js"
 
 const NOW = 1_785_000_000_000
@@ -777,6 +787,98 @@ describe("★★ 外部推理专用模式", () => {
     expect(facets).toEqual(["tasks"])
     expect(plannedNotifications).toBeGreaterThan(0)
     expect(modelCalls).toBe(0)
+
+    await service.detach()
+    vault.close()
+  })
+
+  it("全部外部 Host Commit 后写 Work Layer，并且游标不越过规划后的新数据", async () => {
+    const written: (string | null)[] = []
+    const { service, vault, clock } = makeService({
+      externalInferenceOnly: true,
+      seedChangelog: true,
+      writeWorkFile: (content) => written.push(content),
+    })
+    new ConversationRepository(vault.db).upsert({
+      id: "external-finalize-conversation",
+      channelId: "dingtalk",
+      externalId: "external-finalize-conversation",
+      type: "group",
+      createdAt: NOW,
+    })
+    new MessageRepository(vault.db).upsertMany([
+      {
+        id: "external-finalize-message",
+        channelId: "dingtalk",
+        conversationId: "external-finalize-conversation",
+        externalId: "external-finalize-message",
+        senderExternalId: "self",
+        senderDisplayName: "self",
+        contentText: "I will review the change and report the blocker.",
+        sentAt: NOW - 1,
+        direction: "outbound",
+        isSelf: true,
+        createdAt: NOW,
+      },
+    ])
+
+    await service.refreshWorkLayer()
+    const changelog = new ChangelogRepository(vault.db)
+    const plannedHead = changelog.head()
+    changelog.append([
+      {
+        op: "upsert",
+        entityType: "message",
+        entityId: "arrived-after-planning",
+        channelId: "dingtalk",
+        domain: "chat",
+        occurredAt: NOW + 100,
+        emittedAt: NOW + 100,
+        digest: "after-planning",
+      },
+    ])
+
+    let nextId = 0
+    const host = new ExternalInferenceDistillHost({
+      db: vault.db,
+      clock,
+      newId: () => `external-finalize-${String(nextId++)}`,
+      onHostCommit: () => service.finalizeExternalInferenceRound(),
+    })
+    host.publishPending()
+    const claim = host.claim({ workerId: "worker-finalize" })
+    expect(claim).not.toBeNull()
+    expect(written).toHaveLength(0)
+
+    host.submit({
+      workerId: "worker-finalize",
+      jobId: claim?.job.id ?? "missing-job",
+      submissionId: "external-finalize-submission",
+      contractVersion: "external-inference-v1",
+      result: {
+        items: [
+          {
+            key: "review-change",
+            value: {
+              task: "review changes",
+              from: "teammate",
+              trigger: "change request",
+              askKind: "help_request",
+            },
+            confidence: 0.9,
+            evidence: ["external-finalize-message"],
+          },
+        ],
+      },
+      usageTokens: 19,
+    })
+
+    expect(written).toHaveLength(1)
+    expect(written[0]).toContain("review changes")
+    expect(new ConsumerCursorRepository(vault.db, clock).get(WORK_CONSUMER_ID)?.ackedSeq).toBe(
+      plannedHead,
+    )
+    expect(changelog.head()).toBeGreaterThan(plannedHead)
 
     await service.detach()
     vault.close()

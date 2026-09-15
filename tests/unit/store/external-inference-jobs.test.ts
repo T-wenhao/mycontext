@@ -67,6 +67,22 @@ describe("ExternalInferenceJobRepository", () => {
     expect(reclaimed?.attempts).toBe(2)
   })
 
+  it("marks an expired final lease failed instead of leaving it permanently leased", () => {
+    const vault = openTestVault()
+    const repository = new ExternalInferenceJobRepository(vault.db)
+    enqueue(repository)
+
+    expect(repository.claim("worker-a", NOW, 1_000, 1)?.attempts).toBe(1)
+    expect(repository.claim("worker-b", NOW + 1_001, 1_000, 1)).toBeNull()
+    expect(repository.findById("job-1")).toMatchObject({
+      state: "failed",
+      attempts: 1,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      lastError: "MAX_ATTEMPTS_EXCEEDED",
+    })
+  })
+
   it("revokes a worker lease immediately without waiting for expiry", () => {
     const vault = openTestVault()
     const repository = new ExternalInferenceJobRepository(vault.db)

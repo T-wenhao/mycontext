@@ -245,6 +245,22 @@ export class ExternalInferenceJobRepository {
     const boundedLeaseMs = boundedLease(leaseMs)
     const attemptsLimit = boundedAttempts(maxAttempts)
     const transaction = this.db.transaction(() => {
+      /**
+       * 最后一次租约也可能被 worker 丢下。若只在 SELECT 里排除 attempts 已满的行，
+       * 它会永远停在 leased：无法再领取，状态页却仍显示执行中。领取新任务前
+       * 原子收束这些过期行，让失败可见且不把旧 owner 留在库里。
+       */
+      this.db
+        .prepare(
+          `UPDATE external_inference_jobs
+              SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+                  last_error = 'MAX_ATTEMPTS_EXCEEDED', updated_at = ?
+            WHERE state = 'leased'
+              AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+              AND attempts >= ?`,
+        )
+        .run(now, now, attemptsLimit)
+
       const domainClause = domainKind === undefined ? "" : " AND domain_kind = ?"
       const params: (number | string)[] =
         domainKind === undefined ? [attemptsLimit, now] : [attemptsLimit, now, domainKind]

@@ -31,7 +31,14 @@ import { autoBuildAllowed, resolveKlCredentials } from "@main/bootstrap/startup.
 
 /** 只给这个函数用到的两个字段（其余 resolved() 项与判据无关）。 */
 function fakeRuntimeConfig(klBaseUrl: string, klApiKey: string) {
-  return { resolved: () => ({ klBaseUrl, klApiKey }) } as Parameters<typeof resolveKlCredentials>[0]
+  const base = klBaseUrl.trim() !== "" ? klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
+  const key =
+    klApiKey.trim() !== ""
+      ? klApiKey
+      : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+  return {
+    resolvedKlGateway: () => ({ llmBaseUrl: base.trim(), apiKey: key.trim() }),
+  } as Parameters<typeof resolveKlCredentials>[0]
 }
 
 const ENV_KEYS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] as const

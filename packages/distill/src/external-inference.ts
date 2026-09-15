@@ -82,6 +82,8 @@ export interface ExternalInferenceDistillHostOptions {
   }
   leaseMs?: number
   maxAttempts?: number
+  /** 每次事务性 Host Commit 后通知宿主尝试收尾；回调失败不回滚已提交结果。 */
+  onHostCommit?: () => void
 }
 
 /**
@@ -211,7 +213,7 @@ export class ExternalInferenceDistillHost implements ExternalInferenceWorkerHost
 
     // 先让仓库判断已接受的重试，避免源时间窗被清理后破坏提交幂等性。
     if (existing.state === "committed") {
-      return this.jobs.commit(
+      const committed = this.jobs.commit(
         {
           jobId: input.jobId,
           workerId: input.workerId,
@@ -223,12 +225,14 @@ export class ExternalInferenceDistillHost implements ExternalInferenceWorkerHost
         },
         () => undefined,
       )
+      this.notifyHostCommit()
+      return committed
     }
 
     try {
       const context = this.contextFor(existing)
       const candidates = parseTasksResult(input.result, context)
-      return this.jobs.commit(
+      const committed = this.jobs.commit(
         {
           jobId: input.jobId,
           workerId: input.workerId,
@@ -240,6 +244,10 @@ export class ExternalInferenceDistillHost implements ExternalInferenceWorkerHost
         },
         () => this.applyCommit(context, candidates, normalizeUsageTokens(input.usageTokens), now),
       )
+      // 保持发布窗口有界：前一批完成后补发下一批，再让宿主判断整轮是否已结束。
+      this.publishPending()
+      this.notifyHostCommit()
+      return committed
     } catch (error) {
       const code = errorCode(error)
       if (isSubmissionFailure(error)) {
@@ -259,6 +267,16 @@ export class ExternalInferenceDistillHost implements ExternalInferenceWorkerHost
         }
       }
       throw error
+    }
+  }
+
+  private notifyHostCommit(): void {
+    try {
+      this.options.onHostCommit?.()
+    } catch (error) {
+      this.options.logger?.warn("external distill finalization callback failed", {
+        code: errorCode(error),
+      })
     }
   }
 

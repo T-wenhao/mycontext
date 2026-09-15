@@ -637,24 +637,11 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   )
 }
 
-type RuntimeFieldSource = RuntimeConfigView["embedModel"]["source"]
-type EffectiveFieldSource = RuntimeFieldSource | "inheritedMain" | "inheritedKl"
+type EffectiveFieldSource = RuntimeConfigView["klEffective"]["baseUrlSource"]
 
 /** 主进程解析后的三条真实调用路径；密钥永远只显示可用/不可用。 */
 function EffectiveConfigSummary({ config }: { config: RuntimeConfigView }) {
   const { t } = useDynamicTranslation("settings")
-  const klBaseSource: EffectiveFieldSource =
-    config.klLlmBaseUrl.value.trim() === "" ? "inheritedMain" : config.klLlmBaseUrl.source
-  const klModelSource: EffectiveFieldSource =
-    config.klModelMain.value.trim() === "" ? "inheritedMain" : config.klModelMain.source
-  const klKeySource: EffectiveFieldSource =
-    config.klLlmApiKey.configured || config.klLlmApiKey.source !== "default"
-      ? config.klLlmApiKey.source
-      : "inheritedMain"
-  const embedBaseSource: EffectiveFieldSource =
-    config.embedBaseUrl.value.trim() === "" ? "inheritedKl" : config.embedBaseUrl.source
-  const embedKeySource: EffectiveFieldSource =
-    config.embedApiKey.source === "user" ? "user" : "inheritedKl"
 
   return (
     <section
@@ -698,22 +685,22 @@ function EffectiveConfigSummary({ config }: { config: RuntimeConfigView }) {
           <EffectiveConfigLine
             label={t("model.effective.endpoint")}
             value={config.klEffective.baseUrl}
-            source={klBaseSource}
+            source={config.klEffective.baseUrlSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.model")}
             value={config.klEffective.model}
-            source={klModelSource}
+            source={config.klEffective.modelSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.protocol")}
             value={t(`model.provider.${config.klEffective.provider}`)}
-            source={config.klProvider.source}
+            source={config.klEffective.providerSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.key")}
             value={t(config.klEffective.apiKeyConfigured ? "model.keyOn" : "model.keyOff")}
-            source={klKeySource}
+            source={config.klEffective.apiKeySource}
           />
         </EffectiveRouteCard>
 
@@ -721,29 +708,29 @@ function EffectiveConfigSummary({ config }: { config: RuntimeConfigView }) {
           <EffectiveConfigLine
             label={t("model.effective.endpoint")}
             value={config.klEffective.embedBaseUrl}
-            source={embedBaseSource}
+            source={config.klEffective.embedBaseUrlSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.model")}
-            value={config.embedModel.value}
-            source={config.embedModel.source}
+            value={config.klEffective.embedModel}
+            source={config.klEffective.embedModelSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.dimension")}
-            value={String(config.embeddingDim.value)}
-            source={config.embeddingDim.source}
+            value={String(config.klEffective.embeddingDim)}
+            source={config.klEffective.embeddingDimSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.sendDimensions")}
             value={t(
-              config.embedSendDimensions.value ? "model.effective.send" : "model.effective.omit",
+              config.klEffective.sendDimensions ? "model.effective.send" : "model.effective.omit",
             )}
-            source={config.embedSendDimensions.source}
+            source={config.klEffective.sendDimensionsSource}
           />
           <EffectiveConfigLine
             label={t("model.effective.key")}
-            value={t(config.embedApiKey.configured ? "model.keyOn" : "model.keyOff")}
-            source={embedKeySource}
+            value={t(config.klEffective.embedApiKeyConfigured ? "model.keyOn" : "model.keyOff")}
+            source={config.klEffective.embedApiKeySource}
           />
         </EffectiveRouteCard>
       </div>

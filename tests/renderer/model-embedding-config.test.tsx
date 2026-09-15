@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { I18nextProvider } from "react-i18next"
 import { createI18n } from "@mycontext/i18n"
-import type { MyContextApi, SaveRuntimeConfigInput } from "@mycontext/ipc-contract"
+import type { SaveRuntimeConfigInput } from "@mycontext/ipc-contract"
 import { ModelConfigForm } from "@renderer/features/settings/model-config-form"
 
 class NoopResizeObserver {
@@ -50,10 +50,23 @@ function installApi(initialEmbedModel = "text-embedding-v4"): {
           embedSendDimensions: { value: false, source: "user" as const },
           klEffective: {
             baseUrl: "https://main.example.com/v1",
+            baseUrlSource: "inheritedMain" as const,
             model: mainModel,
+            modelSource: "inheritedMain" as const,
             apiKeyConfigured: true,
+            apiKeySource: "inheritedMain" as const,
             provider: "openai" as const,
+            providerSource: "default" as const,
             embedBaseUrl: "http://127.0.0.1:8000/v1",
+            embedBaseUrlSource: "user" as const,
+            embedModel,
+            embedModelSource: embedSource,
+            embedApiKeyConfigured: true,
+            embedApiKeySource: "user" as const,
+            embeddingDim: 2048,
+            embeddingDimSource: "user" as const,
+            sendDimensions: false,
+            sendDimensionsSource: "user" as const,
           },
         }),
       save: (input: SaveRuntimeConfigInput) => {
@@ -78,8 +91,7 @@ function installApi(initialEmbedModel = "text-embedding-v4"): {
       onChanged: () => () => undefined,
     },
   }
-  ;(globalThis as { window?: { mycontext?: unknown } }).window ??= {}
-  ;(window as unknown as { mycontext: unknown }).mycontext = api as unknown as MyContextApi
+  Object.defineProperty(window, "mycontext", { configurable: true, value: api })
   return { saved }
 }
 

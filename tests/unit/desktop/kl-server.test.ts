@@ -350,6 +350,59 @@ describe("KlServerService · 状态机", () => {
 })
 
 describe("KlServerService · 网关出网边界", () => {
+  it("最终快照为空时清掉继承的旧 KL 网关值", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const stale = {
+      KL_LLM_BASE_URL: "https://stale.example/v1",
+      KL_LLM_MODEL: "stale-model",
+      KL_EMBED_BASE_URL: "https://stale-embed.example/v1",
+      KL_EMBED_MODEL: "stale-embed-model",
+      KL_EMBED_API_KEY: "stale-embed-key",
+      OPENAI_API_KEY: "stale-openai-key",
+      ANTHROPIC_AUTH_TOKEN: "stale-anthropic-key",
+    } as const
+    const previous = Object.fromEntries(
+      Object.keys(stale).map((key) => [key, process.env[key]]),
+    ) as Record<string, string | undefined>
+    Object.assign(process.env, stale)
+
+    try {
+      const runner = fakeRunner()
+      const svc = makeService({
+        runner,
+        probeHealth: async () => true,
+        clock: new ManualClock(1_000),
+        gateway: () => ({
+          llmBaseUrl: "",
+          llmProvider: "openai",
+          llmModel: "",
+          embedBaseUrl: "",
+          embedModel: "",
+          apiKey: "",
+          embedApiKey: "",
+          embeddingDim: 1024,
+          sendDimensions: false,
+        }),
+      })
+      await svc.ensureReady()
+      const env = runner.getSpec()!.env
+      expect(env["KL_LLM_BASE_URL"]).toBeUndefined()
+      expect(env["KL_LLM_MODEL"]).toBeUndefined()
+      expect(env["KL_EMBED_BASE_URL"]).toBeUndefined()
+      expect(env["KL_EMBED_MODEL"]).toBeUndefined()
+      expect(env["KL_EMBED_API_KEY"]).toBeUndefined()
+      expect(env["OPENAI_API_KEY"]).toBeUndefined()
+      expect(env["ANTHROPIC_AUTH_TOKEN"]).toBeUndefined()
+      expect(env["KL_EMBEDDING_DIM"]).toBe("1024")
+      expect(env["KL_EMBED_SEND_DIMENSIONS"]).toBe("0")
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
   it("给了网关 → networkEgress:true，且注入 KL_* env", async () => {
     process.env[KL_PYTHON] = "/fake/python"
     const runner = fakeRunner()

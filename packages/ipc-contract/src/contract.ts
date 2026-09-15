@@ -4138,6 +4138,16 @@ export const runtimeConfigBoolFieldSchema = z.object({
   source: z.enum(["user", "env", "dotenv", "default"]),
 })
 
+/** “最终生效配置”允许标出从主配置或知识库配置继承而来的值。 */
+export const effectiveRuntimeConfigSourceSchema = z.enum([
+  "user",
+  "env",
+  "dotenv",
+  "default",
+  "inheritedMain",
+  "inheritedKl",
+])
+
 /**
  * embedding 三项的**内置默认**（用户没配时用这个）。
  *
@@ -4216,16 +4226,29 @@ export const runtimeConfigViewSchema = z.object({
   /** KL 回退解析后**实际生效**的三项（明文 base/model，key 只给 configured） */
   klEffective: z.object({
     baseUrl: z.string(),
+    baseUrlSource: effectiveRuntimeConfigSourceSchema,
     model: z.string(),
+    modelSource: effectiveRuntimeConfigSourceSchema,
     apiKeyConfigured: z.boolean(),
+    apiKeySource: effectiveRuntimeConfigSourceSchema,
     /** 实际生效的协议（默认层 ?? 用户覆盖） */
     provider: modelProviderSchema,
+    providerSource: effectiveRuntimeConfigSourceSchema,
     /**
      * embedding 那一路**实际会用**的地址（已解析「留空→沿用 KL 地址」并归一化
      * `/v1`）。UI 用它显示「当前实际打到哪」—— 与 `baseUrl` 同一个理由：
      * 留空回退的字段必须让人看得见回退到了什么。
      */
     embedBaseUrl: z.string(),
+    embedBaseUrlSource: effectiveRuntimeConfigSourceSchema,
+    embedModel: z.string(),
+    embedModelSource: effectiveRuntimeConfigSourceSchema,
+    embedApiKeyConfigured: z.boolean(),
+    embedApiKeySource: effectiveRuntimeConfigSourceSchema,
+    embeddingDim: z.number(),
+    embeddingDimSource: effectiveRuntimeConfigSourceSchema,
+    sendDimensions: z.boolean(),
+    sendDimensionsSource: effectiveRuntimeConfigSourceSchema,
   }),
 })
 

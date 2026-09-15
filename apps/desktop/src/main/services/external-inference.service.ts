@@ -24,6 +24,7 @@ export interface ExternalInferenceServiceOptions {
     allow: readonly string[]
   }
   onExternalOnlyEnabled?: () => void
+  onHostCommit?: () => void
 }
 
 export interface ExternalInferenceHandoffView {
@@ -68,6 +69,9 @@ export class ExternalInferenceService {
       ...(this.options.getConversationScope === undefined
         ? {}
         : { getConversationScope: this.options.getConversationScope }),
+      ...(this.options.onHostCommit === undefined
+        ? {}
+        : { onHostCommit: this.options.onHostCommit }),
     })
     const server = new ExternalInferenceMcpServer({
       host,
@@ -84,6 +88,8 @@ export class ExternalInferenceService {
         port: server.port,
         publishedJobs: 0,
       })
+      // 恢复一次“提交已落库、进程却在收尾前退出”的窗口。
+      this.options.onHostCommit?.()
     } catch (error) {
       await server.stop()
       throw error

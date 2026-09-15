@@ -294,6 +294,38 @@ export class DistillTaskRepository {
   }
 
   /**
+   * 给异步执行方判断一轮是否已经具备收尾条件。
+   *
+   * 只有全部必需 facet 都处于 done/skipped 才 complete；failed 必须继续可见并
+   * 阻止游标前进，不能把“失败”折成“这一轮结束”。windowEnd 是这批任务能安全
+   * 确认到的时间边界，宿主据此换算 changelog 水位。
+   */
+  completionBoundary(facets: readonly string[]): {
+    complete: boolean
+    windowEnd: number | null
+  } {
+    if (facets.length === 0) return { complete: false, windowEnd: null }
+    const placeholders = facets.map(() => "?").join(",")
+    const row = this.db
+      .prepare<
+        string[],
+        { window_end: number | null; unfinished: number | null; finished: number | null }
+      >(
+        `SELECT MAX(window_end) AS window_end,
+                SUM(CASE WHEN state IN ('pending','running','failed') THEN 1 ELSE 0 END) AS unfinished,
+                SUM(CASE WHEN state IN ('done','skipped') THEN 1 ELSE 0 END) AS finished
+           FROM distill_tasks
+          WHERE facet IN (${placeholders})`,
+      )
+      .get(...facets)
+    const finished = row?.finished ?? 0
+    return {
+      complete: finished > 0 && (row?.unfinished ?? 0) === 0,
+      windowEnd: row?.window_end ?? null,
+    }
+  }
+
+  /**
    * 清空任务（"重新蒸馏"时用）。
    *
    * 只删任务**不删 facet**：合并是幂等的（按 `(facet, scope, scope_ref, key)`

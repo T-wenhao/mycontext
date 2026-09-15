@@ -90,7 +90,7 @@ export interface ExternalInferenceMcpServerOptions {
   host: ExternalInferenceWorkerHost
   clock: Clock
   logger?: Logger
-  /** 0 = ask the OS for an available loopback port. */
+  /** 0 表示让操作系统分配一个可用的回环端口。 */
   port?: number
   credentials?: ExternalInferenceCredentialAuthority
   maxBodyBytes?: number

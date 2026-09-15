@@ -949,6 +949,37 @@ export class DistillService {
     }
   }
 
+  /**
+   * 外部 worker 完成一次 Host Commit 后尝试收尾当前异步轮次。
+   *
+   * 这条路径不等待 worker，也不调用付费模型。只在所有 `tasks` 任务都已 done
+   * 或 skipped 后写 Work Layer，并把游标推进到任务窗口对应的历史水位；规划后
+   * 新到的变更仍留给下一轮。重复调用靠游标幂等。
+   */
+  finalizeExternalInferenceRound(): boolean {
+    const db = this.db
+    if (db === null) return false
+    const boundary = new DistillTaskRepository(db).completionBoundary([EXTERNAL_DISTILL_FACET])
+    if (!boundary.complete || boundary.windowEnd === null) return false
+
+    const changelog = new ChangelogRepository(db)
+    const ackSeq = changelog.headAtOrBefore(boundary.windowEnd)
+    const cursors = new ConsumerCursorRepository(db, this.options.clock)
+    const cursor = cursors.register(WORK_CONSUMER_ID, { required: false })
+    if (ackSeq <= cursor.ackedSeq) return false
+
+    this.finalizeWorkLayer(ackSeq)
+    this.options.logger.info("external inference round finalized", {
+      facet: EXTERNAL_DISTILL_FACET,
+      ackSeq,
+      windowEnd: boundary.windowEnd,
+    })
+    // forge 是纯本地测量；再发布一次，让 skill 索引立即包含刚写出的 work.md。
+    void this.runForgeStep(this.plannedSince, this.plannedWindowDays)
+    this.emit(this.progress())
+    return true
+  }
+
   stop(): void {
     if (this.timer !== null) {
       clearInterval(this.timer)
