@@ -130,3 +130,21 @@ pnpm run verify   # format + lint + typecheck + check:all + test + smoke
 - 引用代码位置写 `path/to/file.ts:123`。
 - 不要为了通过类型检查加 `as any` / `as unknown as T` —— 那通常盖住的是
   一个真实的形状差异。
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+规格与任务记录在 origin 远端仓库的问题跟踪器中，通过 `gh` CLI 操作。详见
+`docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用五种标准任务状态标签。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+采用 multi-context 布局，由根目录 `CONTEXT-MAP.md` 索引各模块的领域文档。
+详见 `docs/agents/domain.md`。
