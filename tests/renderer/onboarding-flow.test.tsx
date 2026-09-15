@@ -428,8 +428,10 @@ describe("★ 模型那一步：用交互承载信息，不是堆 tips", () => {
     await waitFor(() => {
       expect(screen.getAllByLabelText("接口地址").length).toBeGreaterThan(0)
     })
-    // 桩里 configured:false → 显示「未配置」这个短标签
-    expect(screen.getByText("未配置")).toBeTruthy()
+    // 桩里 configured:false → 至少有一个「未配置」短标签；最终配置摘要也会显示同文案。
+    expect(
+      screen.getAllByText("未配置").some((element) => element.className.includes("rounded-full")),
+    ).toBe(true)
     // 首版那句整行描述不该还在
     expect(screen.queryByText(/尚未配置/)).toBeNull()
   })
