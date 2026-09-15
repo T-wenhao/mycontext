@@ -92,6 +92,11 @@ const api: MyContextApi = {
       return () => ipcRenderer.removeListener(IPC_EVENTS.distillProgress, handler)
     },
   },
+  externalInference: {
+    status: () => ipcRenderer.invoke(IPC_CHANNELS.externalInferenceStatus),
+    handoff: (input) => ipcRenderer.invoke(IPC_CHANNELS.externalInferenceHandoff, input),
+    setMode: (input) => ipcRenderer.invoke(IPC_CHANNELS.externalInferenceSetMode, input),
+  },
   persona: {
     snapshot: () => ipcRenderer.invoke(IPC_CHANNELS.personaSnapshot),
     conversations: () => ipcRenderer.invoke(IPC_CHANNELS.personaConversations),

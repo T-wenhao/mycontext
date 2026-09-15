@@ -104,6 +104,23 @@ export class ChangelogRepository {
   }
 
   /**
+   * 某个规划时刻之前已经进入变更日志的水位。
+   *
+   * 外部推理可能几小时后才提交；若收尾时直接取 `head()`，会把规划之后新到的
+   * 消息也标成已蒸馏。按 `emitted_at` 截住才能让下一轮继续看到那些新数据。
+   */
+  headAtOrBefore(emittedAt: number): number {
+    return (
+      this.db
+        .prepare<
+          [number],
+          { seq: number | null }
+        >("SELECT MAX(seq) AS seq FROM knowledge_changelog WHERE emitted_at <= ?")
+        .get(emittedAt)?.seq ?? 0
+    )
+  }
+
+  /**
    * 每个 domain 的水位。
    *
    * ## ★ 为什么不用 `GROUP BY domain`

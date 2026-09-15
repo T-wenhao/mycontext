@@ -16,6 +16,8 @@ import type {
   StorageUsage,
   ClearCachesResult,
   DistillProgressView,
+  ExternalInferenceStatusView,
+  ExternalInferenceHandoffView,
   PersonaConversationView,
   PersonaDraftView,
   PersonaLimitsQuery,
@@ -287,6 +289,11 @@ export interface MyContextApi {
     reset(): Promise<Result<DistillProgressView>>
     /** 订阅进度推送。返回取消订阅函数 */
     onProgress(listener: (progress: DistillProgressView) => void): () => void
+  }
+  externalInference: {
+    status(): Promise<Result<ExternalInferenceStatusView>>
+    handoff(input: { workerId: string }): Promise<Result<ExternalInferenceHandoffView>>
+    setMode(input: { externalOnly: boolean }): Promise<Result<{ externalOnly: boolean }>>
   }
   persona: {
     snapshot(): Promise<Result<PersonaSnapshotView>>

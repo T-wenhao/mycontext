@@ -82,6 +82,10 @@ export const IPC_CHANNELS = {
   distillProgress: "mycontext:distill/progress",
   distillStart: "mycontext:distill/start",
   distillReset: "mycontext:distill/reset",
+  /** 外部推理 worker 的交接与不含正文的生命周期状态。 */
+  externalInferenceStatus: "mycontext:external-inference/status",
+  externalInferenceHandoff: "mycontext:external-inference/handoff",
+  externalInferenceSetMode: "mycontext:external-inference/set-mode",
   /**
    * 清空当前渠道的数据（不可逆）。
    *
@@ -1255,6 +1259,66 @@ export const distillStartInputSchema = z.object({
   days: z.number().nullable().optional(),
   windowDays: z.number().optional(),
 })
+
+export const externalInferenceWorkerInputSchema = z.object({
+  workerId: z.string().trim().min(1).max(128),
+})
+
+export const externalInferenceModeInputSchema = z.object({
+  externalOnly: z.boolean(),
+})
+
+export const externalInferenceJobStateSchema = z.enum([
+  "pending",
+  "leased",
+  "committed",
+  "failed",
+  "skipped",
+])
+
+export const externalInferenceJobSchema = z.object({
+  id: z.string(),
+  domainKind: z.literal("distillation"),
+  domainRef: z.string(),
+  state: externalInferenceJobStateSchema,
+  attempts: z.number().int(),
+  leaseOwner: z.string().nullable(),
+  leaseExpiresAt: z.number().nullable(),
+  promptVersion: z.string(),
+  contractVersion: z.string(),
+  submissionId: z.string().nullable(),
+  submissionDigest: z.string().nullable(),
+  resultCount: z.number().int().nullable(),
+  usageTokens: z.number().int().nullable(),
+  lastError: z.string().nullable(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+export const externalInferenceStatusSchema = z.object({
+  total: z.number().int(),
+  pending: z.number().int(),
+  leased: z.number().int(),
+  committed: z.number().int(),
+  failed: z.number().int(),
+  skipped: z.number().int(),
+  jobs: z.array(externalInferenceJobSchema),
+  endpoint: z.string().nullable(),
+  handoffPath: z.string().nullable(),
+  externalOnly: z.boolean(),
+  activeCredentials: z.number().int(),
+})
+
+export const externalInferenceHandoffSchema = z.object({
+  path: z.string(),
+  endpoint: z.string(),
+  workerId: z.string(),
+  expiresAt: z.number(),
+  externalOnly: z.literal(true),
+})
+
+export type ExternalInferenceStatusView = z.infer<typeof externalInferenceStatusSchema>
+export type ExternalInferenceHandoffView = z.infer<typeof externalInferenceHandoffSchema>
 
 // ---------------------------------------------------------------
 // 数字人
@@ -4074,6 +4138,16 @@ export const runtimeConfigBoolFieldSchema = z.object({
   source: z.enum(["user", "env", "dotenv", "default"]),
 })
 
+/** “最终生效配置”允许标出从主配置或知识库配置继承而来的值。 */
+export const effectiveRuntimeConfigSourceSchema = z.enum([
+  "user",
+  "env",
+  "dotenv",
+  "default",
+  "inheritedMain",
+  "inheritedKl",
+])
+
 /**
  * embedding 三项的**内置默认**（用户没配时用这个）。
  *
@@ -4152,16 +4226,29 @@ export const runtimeConfigViewSchema = z.object({
   /** KL 回退解析后**实际生效**的三项（明文 base/model，key 只给 configured） */
   klEffective: z.object({
     baseUrl: z.string(),
+    baseUrlSource: effectiveRuntimeConfigSourceSchema,
     model: z.string(),
+    modelSource: effectiveRuntimeConfigSourceSchema,
     apiKeyConfigured: z.boolean(),
+    apiKeySource: effectiveRuntimeConfigSourceSchema,
     /** 实际生效的协议（默认层 ?? 用户覆盖） */
     provider: modelProviderSchema,
+    providerSource: effectiveRuntimeConfigSourceSchema,
     /**
      * embedding 那一路**实际会用**的地址（已解析「留空→沿用 KL 地址」并归一化
      * `/v1`）。UI 用它显示「当前实际打到哪」—— 与 `baseUrl` 同一个理由：
      * 留空回退的字段必须让人看得见回退到了什么。
      */
     embedBaseUrl: z.string(),
+    embedBaseUrlSource: effectiveRuntimeConfigSourceSchema,
+    embedModel: z.string(),
+    embedModelSource: effectiveRuntimeConfigSourceSchema,
+    embedApiKeyConfigured: z.boolean(),
+    embedApiKeySource: effectiveRuntimeConfigSourceSchema,
+    embeddingDim: z.number(),
+    embeddingDimSource: effectiveRuntimeConfigSourceSchema,
+    sendDimensions: z.boolean(),
+    sendDimensionsSource: effectiveRuntimeConfigSourceSchema,
   }),
 })
 

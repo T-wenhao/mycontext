@@ -226,6 +226,20 @@ export type {
   DistillProgress,
 } from "./repositories/distill-tasks.js"
 
+export { ExternalInferenceJobRepository, ExternalInferenceJobError } from "./repositories/external-inference-jobs.js"
+export type {
+  ExternalInferenceClaim,
+  ExternalInferenceEvidence,
+  ExternalInferenceSubmission,
+  ExternalInferenceSubmitResult,
+  ExternalInferenceWorkerHost,
+  ExternalInferenceDomainKind,
+  ExternalInferenceJobRow,
+  ExternalInferenceJobState,
+  ExternalInferenceJobStatus,
+} from "./repositories/external-inference-jobs.js"
+export { EXTERNAL_INFERENCE_CONTRACT_VERSION } from "./repositories/external-inference-jobs.js"
+
 export { ProfileFacetRepository } from "./repositories/profile-facets.js"
 export type { ProfileFacetRow, FacetWrite } from "./repositories/profile-facets.js"
 

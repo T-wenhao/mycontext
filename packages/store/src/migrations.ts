@@ -47,6 +47,7 @@ import { VAULT_0029_DOCUMENT_COVERAGE } from "./migrations/vault/v29-document-co
 import { VAULT_0030_ELIGIBILITY } from "./migrations/vault/v30-eligibility.js"
 import { VAULT_0031_REJUDGE_UNREADABLE } from "./migrations/vault/v31-rejudge-unreadable.js"
 import { VAULT_0032_NULL_LAST_MESSAGE_AT } from "./migrations/vault/v32-null-last-message-at.js"
+import { VAULT_0033_EXTERNAL_INFERENCE } from "./migrations/vault/v33-external-inference.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -387,6 +388,7 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
   { version: 30, name: "eligibility", sql: VAULT_0030_ELIGIBILITY },
   { version: 31, name: "rejudge-unreadable", sql: VAULT_0031_REJUDGE_UNREADABLE },
   { version: 32, name: "null-last-message-at", sql: VAULT_0032_NULL_LAST_MESSAGE_AT },
+  { version: 33, name: "external-inference", sql: VAULT_0033_EXTERNAL_INFERENCE },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

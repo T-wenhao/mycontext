@@ -17,8 +17,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ManualClock, createLogger } from "@mycontext/kernel"
 import { LlmClient, staticLlmProvider } from "@mycontext/llm"
-import { DistillService, type ForgeRunOutcome } from "@main/services/distill.service.js"
-import { ChangelogRepository } from "@mycontext/store"
+import {
+  DistillService,
+  WORK_CONSUMER_ID,
+  type ForgeRunOutcome,
+} from "@main/services/distill.service.js"
+import { ExternalInferenceDistillHost } from "@mycontext/distill"
+import {
+  ChangelogRepository,
+  ConsumerCursorRepository,
+  ConversationRepository,
+  MessageRepository,
+} from "@mycontext/store"
 import { openTestVault } from "../../helpers/vault.js"
 
 const NOW = 1_785_000_000_000
@@ -32,14 +42,15 @@ afterEach(() => {
  * 一个不打网络的假 LLM。返回一条形状合法但内容为空的 JSON —— work 层那几条
  * 只关心"有没有发起调用"，不关心抽出了什么（那由 map.test.ts 覆盖）。
  */
-function fakeLlm(): LlmClient {
+function fakeLlm(onRequest: () => void = () => undefined): LlmClient {
   return new LlmClient({
     baseUrl: "https://fake.invalid",
     apiKey: "k",
     model: "m",
     sleep: () => Promise.resolve(),
-    fetchImpl: () =>
-      Promise.resolve({
+    fetchImpl: () => {
+      onRequest()
+      return Promise.resolve({
         ok: true,
         status: 200,
         json: () =>
@@ -48,7 +59,8 @@ function fakeLlm(): LlmClient {
             usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
           }),
         text: () => Promise.resolve(""),
-      } as unknown as Response),
+      } as unknown as Response)
+    },
   })
 }
 
@@ -109,6 +121,8 @@ function makeService(options: {
   workArtifactExists?: () => boolean
   /** 建图在跑吗 —— 给"让路"那组用 */
   graphBusy?: () => boolean
+  externalInferenceOnly?: boolean
+  onExternalInferenceTasksPlanned?: () => void
 }) {
   const clock = new ManualClock(NOW)
   const vault = openTestVault()
@@ -139,6 +153,12 @@ function makeService(options: {
       : { onProfileChanged: options.onProfileChanged }),
     ...(options.onCorpusReady === undefined ? {} : { onCorpusReady: options.onCorpusReady }),
     ...(options.graphBusy === undefined ? {} : { graphBusy: options.graphBusy }),
+    ...(options.externalInferenceOnly === undefined
+      ? {}
+      : { externalInferenceOnly: () => options.externalInferenceOnly === true }),
+    ...(options.onExternalInferenceTasksPlanned === undefined
+      ? {}
+      : { onExternalInferenceTasksPlanned: options.onExternalInferenceTasksPlanned }),
   })
   if (options.seedChangelog === true) {
     new ChangelogRepository(vault.db).append([
@@ -716,6 +736,151 @@ describe("★★ llmFacets 关着时不报任务计数", () => {
     plantLegacyTasks(vault, 6)
     // forge 卡片是常显的，归零任务计数不该把它一起抹掉
     expect(service.progress().forge).not.toBeUndefined()
+    vault.close()
+  })
+})
+
+describe("★★ 外部推理专用模式", () => {
+  it("只规划 tasks Facet，并且不调用本地模型", async () => {
+    let modelCalls = 0
+    let plannedNotifications = 0
+    const { service, vault } = makeService({
+      externalInferenceOnly: true,
+      seedChangelog: true,
+      llm: fakeLlm(() => {
+        modelCalls += 1
+      }),
+      onExternalInferenceTasksPlanned: () => {
+        plannedNotifications += 1
+      },
+    })
+
+    new ConversationRepository(vault.db).upsert({
+      id: "external-mode-conversation",
+      channelId: "dingtalk",
+      externalId: "external-mode-conversation",
+      type: "group",
+      createdAt: NOW,
+    })
+    new MessageRepository(vault.db).upsertMany([
+      {
+        id: "external-mode-message",
+        channelId: "dingtalk",
+        conversationId: "external-mode-conversation",
+        externalId: "external-mode-message",
+        senderExternalId: "self",
+        senderDisplayName: "self",
+        contentText: "Please review this task.",
+        sentAt: NOW - 1,
+        direction: "outbound",
+        isSelf: true,
+        createdAt: NOW,
+      },
+    ])
+
+    await service.refreshWorkLayer()
+
+    const facets = vault.db
+      .prepare<[], { facet: string }>("SELECT DISTINCT facet FROM distill_tasks ORDER BY facet")
+      .all()
+      .map((row) => row.facet)
+    expect(facets).toEqual(["tasks"])
+    expect(plannedNotifications).toBeGreaterThan(0)
+    expect(modelCalls).toBe(0)
+
+    await service.detach()
+    vault.close()
+  })
+
+  it("全部外部 Host Commit 后写 Work Layer，并且游标不越过规划后的新数据", async () => {
+    const written: (string | null)[] = []
+    const { service, vault, clock } = makeService({
+      externalInferenceOnly: true,
+      seedChangelog: true,
+      writeWorkFile: (content) => written.push(content),
+    })
+    new ConversationRepository(vault.db).upsert({
+      id: "external-finalize-conversation",
+      channelId: "dingtalk",
+      externalId: "external-finalize-conversation",
+      type: "group",
+      createdAt: NOW,
+    })
+    new MessageRepository(vault.db).upsertMany([
+      {
+        id: "external-finalize-message",
+        channelId: "dingtalk",
+        conversationId: "external-finalize-conversation",
+        externalId: "external-finalize-message",
+        senderExternalId: "self",
+        senderDisplayName: "self",
+        contentText: "I will review the change and report the blocker.",
+        sentAt: NOW - 1,
+        direction: "outbound",
+        isSelf: true,
+        createdAt: NOW,
+      },
+    ])
+
+    await service.refreshWorkLayer()
+    const changelog = new ChangelogRepository(vault.db)
+    const plannedHead = changelog.head()
+    changelog.append([
+      {
+        op: "upsert",
+        entityType: "message",
+        entityId: "arrived-after-planning",
+        channelId: "dingtalk",
+        domain: "chat",
+        occurredAt: NOW + 100,
+        emittedAt: NOW + 100,
+        digest: "after-planning",
+      },
+    ])
+
+    let nextId = 0
+    const host = new ExternalInferenceDistillHost({
+      db: vault.db,
+      clock,
+      newId: () => `external-finalize-${String(nextId++)}`,
+      onHostCommit: () => service.finalizeExternalInferenceRound(),
+    })
+    host.publishPending()
+    const claim = host.claim({ workerId: "worker-finalize" })
+    expect(claim).not.toBeNull()
+    expect(written).toHaveLength(0)
+
+    host.submit({
+      workerId: "worker-finalize",
+      jobId: claim?.job.id ?? "missing-job",
+      submissionId: "external-finalize-submission",
+      contractVersion: "external-inference-v1",
+      result: {
+        items: [
+          {
+            key: "review-change",
+            value: {
+              task: "review changes",
+              from: "teammate",
+              trigger: "change request",
+              askKind: "help_request",
+            },
+            confidence: 0.9,
+            evidence: ["external-finalize-message"],
+          },
+        ],
+      },
+      usageTokens: 19,
+    })
+
+    expect(written).toHaveLength(1)
+    expect(written[0]).toContain("review changes")
+    expect(new ConsumerCursorRepository(vault.db, clock).get(WORK_CONSUMER_ID)?.ackedSeq).toBe(
+      plannedHead,
+    )
+    expect(changelog.head()).toBeGreaterThan(plannedHead)
+
+    await service.detach()
     vault.close()
   })
 })

@@ -78,6 +78,7 @@ import { DashboardTrendsService } from "../services/dashboard-trends.service.js"
 import { MultiGraphQueryService } from "../services/multi-graph-query.service.js"
 import { AdvancedAiService } from "../services/advanced-ai.service.js"
 import { RuntimeConfigService } from "../services/runtime-config.service.js"
+import { ExternalInferenceService } from "../services/external-inference.service.js"
 import { SecretStore } from "../services/secret-store.js"
 import { PreferencesService } from "../services/preferences.service.js"
 import { ScryptPasswordHasher } from "../services/password-hasher.js"
@@ -101,6 +102,8 @@ export interface AppContext {
   distillSources: DistillSourceService
   /** 蒸馏执行（切窗 + 跑任务 + 进度推送） */
   distill: DistillService
+  /** 外部推理 worker：loopback MCP + vault 级任务宿主 */
+  externalInference: ExternalInferenceService
   forge: ForgeService
   /** 数字人管控层接线 */
   persona: PersonaService
@@ -198,13 +201,8 @@ export function resolveKlCredentials(runtimeConfig: RuntimeConfigService): {
   base: string
   key: string
 } {
-  const r = runtimeConfig.resolved()
-  const base = r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
-  const key =
-    r.klApiKey.trim() !== ""
-      ? r.klApiKey
-      : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
-  return { base: base.trim(), key: key.trim() }
+  const gateway = runtimeConfig.resolvedKlGateway()
+  return { base: gateway.llmBaseUrl, key: gateway.apiKey }
 }
 
 /**
@@ -904,6 +902,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     localeId: resolveLanguage(preferences.language(), app.getLocale()) === "en" ? "en" : "zh-CN",
   })
 
+  const externalInferenceRef: { current: ExternalInferenceService | null } = { current: null }
   const distill = new DistillService({
     clock: systemClock,
     logger: logger.child("Distill"),
@@ -941,6 +940,10 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 蒸馏的收尾。`tickGraphSync` 自己有 `inFlightSync` 挡并发。
      */
     onCorpusReady: () => void feed.tickGraphSync(),
+    onExternalInferenceTasksPlanned: () => {
+      externalInferenceRef.current?.publishPending()
+    },
+    externalInferenceOnly: () => externalInferenceRef.current?.isExternalOnly() === true,
     /**
      * ★★ 工作层抽取的开关 —— 这就是让 work 层从"代码写好了"变成"真的会跑"
      * 的那一行。
@@ -996,6 +999,16 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     graphBusy: () => klServer.status().building,
   })
+
+  const externalInference = new ExternalInferenceService({
+    clock: systemClock,
+    logger: logger.child("ExternalInference"),
+    getForbiddenTerms: () => distill.externalInferenceForbiddenTerms(),
+    getConversationScope: () => distill.externalInferenceConversationScope(),
+    onExternalOnlyEnabled: () => void distill.refreshWorkLayer(),
+    onHostCommit: () => distill.finalizeExternalInferenceRound(),
+  })
+  externalInferenceRef.current = externalInference
 
   /**
    * kl-server 端口：KlServerService 起在这里，两条 agent 路径（SearchService
@@ -1278,41 +1291,7 @@ export function bootstrapApp(mainDir: string): AppContext {
      * （留空回退主配置）。用户在设置里改了网关后，下次 kl 重启就用新值。
      */
     gateway: () => {
-      const { base, key } = resolveKlCredentials(runtimeConfig)
-      const r = runtimeConfig.resolved()
-      return {
-        // ★ LLM 传输由 kl 侧 provider 决定（anthropic 拼 /v1/messages、openai 拼
-        // /chat/completions），base 照原样传 —— 带不带 /v1 都行，kl 的
-        // litellm_base_url 会按传输规整（见 kl_graph/utils/litellm_config.py）。
-        // 裸模型名（kl 自己拼 provider 前缀）。见 kl_graph/config.py。
-        llmBaseUrl: base,
-        // ★ 协议：用户在设置里声明/测试连接识别到的。默认 openai（见 config.ts 的长注释）
-        // —— 这是「OpenAI 兼容网关被当 Anthropic 发 → 404」那个报错的修复。
-        llmProvider: r.klProvider,
-        // ★ kl 抽取模型：默认回退主模型（glm-5.2）。想给 kl 单独指一个模型就在设置里
-        // 填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
-        llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-        // ★ embedding 走 OpenAI 兼容，地址与维度现在都**可在设置里单独配**
-        // （`resolved()` 已解析「留空→沿用 KL 地址」并把 `/v1` 归一化）。
-        //
-        // 为什么要独立：有的网关只给 chat 不给 embedding —— 实测遇到过一个
-        // OpenAI 兼容口，`/models` 返回的 12 个模型全是 chat/image/audio，
-        // `/embeddings` 对任何模型名都回 `Model not exist.`。那种网关上 LLM
-        // 能用而建图必卡在算向量，此前配置层没有入口把 embedding 指到别处。
-        embedBaseUrl: r.embedBaseUrl,
-        embedModel: r.embedModel,
-        apiKey: key,
-        // ★ embedding 那把（已解析「留空→沿用 KL 那把」）。地址指到另一个 host 时
-        // 两把 key 必然不同 —— 少了这一项那个 host 会一路 401。
-        embedApiKey: r.embedApiKey,
-        // ★ 维度必须与所用模型**实际返回**的宽度一致，否则向量库 upsert 会崩。
-        // 默认仍是 2048 + 带 dimensions（DashScope `text-embedding-v4` 的
-        // matryoshka 口径：它默认返 1024，kl 默认建 4096 维集合，两边都不匹配）。
-        // 换别家 embedding 服务时在设置里改这两项 —— 自建 vLLM 要关掉
-        // sendDimensions（它拒收带 `dimensions` 的请求）。
-        embeddingDim: r.embeddingDim,
-        sendDimensions: r.embedSendDimensions,
-      }
+      return runtimeConfig.resolvedKlGateway()
     },
     /**
      * 自动建图的调度快照 → `graphOverview().buildSchedule`（界面上
@@ -1398,27 +1377,7 @@ export function bootstrapApp(mainDir: string): AppContext {
   }
 
   /** 网关配置：主渠道与各渠道共用同一份推导（改一处两边都变）。 */
-  const klGateway = () => {
-    const r = runtimeConfig.resolved()
-    const base = r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
-    const key =
-      r.klApiKey.trim() !== ""
-        ? r.klApiKey
-        : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
-    return {
-      llmBaseUrl: base,
-      // ★ 协议与主 gateway() 同源（改一处两边都变）：默认 openai，修那个 404 报错。
-      llmProvider: r.klProvider,
-      llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-      // ★ 与上面主 gateway() 同源：embedding 四项都取已解析值（可在设置里单独配）。
-      embedBaseUrl: r.embedBaseUrl,
-      embedModel: r.embedModel,
-      apiKey: key,
-      embedApiKey: r.embedApiKey,
-      embeddingDim: r.embeddingDim,
-      sendDimensions: r.embedSendDimensions,
-    }
-  }
+  const klGateway = () => runtimeConfig.resolvedKlGateway()
 
   const pipelines = new ChannelPipelineManager<ChannelPipelineParts>({
     logger: logger.child("ChannelPipeline"),
@@ -2110,6 +2069,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       distillSources,
       search,
       media,
+      externalInference,
       distill,
       persona,
       klServer,
@@ -2412,6 +2372,23 @@ export function bootstrapApp(mainDir: string): AppContext {
        */
       () => readForgeWorkContext(vp.forgeRoot),
     )
+    /**
+     * External Inference 只在已绑定身份的 vault 上开放：它会把当前任务的
+     * 有界语料交给 loopback worker，未绑定时不应有可领取的工作。
+     * 交接清单放在应用级 userData 而非 vault 内，避免向 worker 暴露 vault 路径；
+     * server 停在 vault teardown 之前，避免 worker 在关库期间继续提交。
+     */
+    if (dataFlowsAllowed) {
+      await externalInference
+        .attach(handle.db, join(paths.userData, "external-inference", "handoff.json"))
+        .catch((error: unknown) => {
+          logger.error("external inference attach failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        })
+    } else {
+      await externalInference.detach()
+    }
     /**
      * agent 的三个目录：workspace 与 HOME 按 vault，npm 缓存应用级一份。
      *
@@ -2916,6 +2893,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     onboarding,
     distillSources,
     distill,
+    externalInference,
     persona,
     media,
     mediaByChannel,
@@ -2951,6 +2929,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     onboarding,
     distillSources,
     distill,
+    externalInference,
     forge,
     persona,
     media,
@@ -3004,6 +2983,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       // 先优雅收掉 opencode（撤 token + kill 进程，无孤儿），再 detach。
       await runShutdownStep(runner, "search", () => search.shutdown())
       search.detach()
+      await runShutdownStep(runner, "externalInference", () => externalInference.detach())
       await runShutdownStep(runner, "distill", () => distill.detach())
       await runShutdownStep(runner, "persona", () => persona.detach())
       // kl 子进程同样优雅停（SIGTERM→SIGKILL，无孤儿）。

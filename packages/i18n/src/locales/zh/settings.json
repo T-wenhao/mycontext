@@ -69,8 +69,9 @@
       "runtime": "运行环境",
       "paths": "数据目录",
       "database": "数据库（已应用迁移 v{{version}}）",
-      "config": "配置注入",
+      "config": "配置注入（启动基础层）",
       "dataPlane": "数据面",
+      "externalInference": "外部推理",
       "kl": "知识图谱（kl）"
     },
     "runtime": {
@@ -103,7 +104,7 @@
       "configured": "已配置（值不显示）",
       "notConfigured": "未配置",
       "empty": "（空）",
-      "note": "优先级：内置默认 < .env 文件 < 环境变量。密钥类配置只显示是否已配置。",
+      "note": "这里只显示启动基础层：内置默认 < .env 文件 < 环境变量。最终运行值还会叠加数据库中的「设置保存」覆盖，请到设置 → 模型服务查看「最终生效配置」。密钥类配置只显示是否已配置。",
       "sources": {
         "default": "内置默认",
         "dotenv": ".env 文件",
@@ -150,6 +151,21 @@
         "dingtalk": "钉钉",
         "feishu": "飞书"
       }
+    },
+    "externalInference": {
+      "description": "把高开销蒸馏交给你选择的本机 Agent；MyContext 只提供有界语料，并负责校验和写入。不会自动回退到付费模型。",
+      "loading": "正在读取外部任务状态…",
+      "unavailable": "外部推理服务尚未挂载。",
+      "enabled": "仅外部执行",
+      "disabled": "未启用",
+      "prepare": "准备交接清单",
+      "stop": "停止并撤销",
+      "pending": "待领取",
+      "leased": "执行中",
+      "committed": "已提交",
+      "failed": "失败",
+      "handoffPath": "交接清单",
+      "handoffHint": "只把这个清单路径交给你选择的 Agent；停止后凭据与在途租约会立即撤销。"
     },
     "topology": {
       "title": "数据平面",
@@ -438,7 +454,8 @@
       "dimHint": "必须和所用模型实际返回的宽度一致 —— 填错会在写向量库时直接崩，不是变慢。换模型后请以实测返回值为准。",
       "sendDimensions": "请求里带 dimensions 参数",
       "sendDimensionsHint": "按上面的维度做截断（matryoshka）。自建的向量服务（如 vLLM）通常不接受这个参数，接自建服务时关掉。",
-      "noneOnGateway": "这个网关一个向量模型都没有 —— 建图会卡在算向量这一步。在下面「向量服务单独用别的地址」里指到一个能出向量的服务。"
+      "noneOnGateway": "这个网关一个向量模型都没有 —— 建图会卡在算向量这一步。在下面「向量服务单独用别的地址」里指到一个能出向量的服务。",
+      "customModel": "向量模型（手动填写）"
     },
     "kl": {
       "title": "知识库单独用别的模型",
@@ -453,6 +470,29 @@
     "keyOff": "未配置",
     "keyTail": "已配置 …{{tail}}",
     "other": "其它…",
+    "effective": {
+      "title": "最终生效配置",
+      "hint": "主进程合并已保存设置、环境变量、.env 与内置默认后的真实值；未保存草稿不计入，密钥只显示是否可用。",
+      "main": "主模型",
+      "knowledge": "知识库抽取",
+      "embedding": "向量",
+      "endpoint": "接口",
+      "model": "模型",
+      "protocol": "协议",
+      "key": "密钥",
+      "dimension": "维度",
+      "sendDimensions": "dimensions 参数",
+      "send": "发送",
+      "omit": "不发送",
+      "sources": {
+        "user": "设置保存",
+        "env": "环境变量",
+        "dotenv": ".env",
+        "default": "内置默认",
+        "inheritedMain": "跟随主配置",
+        "inheritedKl": "跟随知识库"
+      }
+    },
     "probe": {
       "test": "测试连接",
       "testing": "正在测试…",

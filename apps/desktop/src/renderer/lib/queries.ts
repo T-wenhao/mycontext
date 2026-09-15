@@ -32,6 +32,7 @@ import { unwrap } from "./api.js"
 export const QUERY_KEYS = {
   bootstrap: ["bootstrap"] as const,
   status: ["status"] as const,
+  externalInference: ["external-inference"] as const,
   channels: ["channels"] as const,
   ingest: ["ingest"] as const,
   /** 已解析的本人身份（只读）。与 ingest 分开：它变化频率低得多 */
@@ -69,6 +70,39 @@ export function useStatusReport(enabled: boolean) {
     queryKey: QUERY_KEYS.status,
     queryFn: async () => unwrap(await window.mycontext.app.statusReport()),
     enabled,
+  })
+}
+
+/** 外部任务是异步执行的，状态页打开时短轮询即可看到领取与提交变化。 */
+export function useExternalInferenceStatus(enabled = true) {
+  return useQuery({
+    queryKey: QUERY_KEYS.externalInference,
+    queryFn: async () => unwrap(await window.mycontext.externalInference.status()),
+    enabled,
+    refetchInterval: enabled ? 2_000 : false,
+  })
+}
+
+export function useExternalInferenceHandoff() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (workerId: string) =>
+      unwrap(await window.mycontext.externalInference.handoff({ workerId })),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.externalInference })
+    },
+  })
+}
+
+export function useExternalInferenceMode() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (externalOnly: boolean) =>
+      unwrap(await window.mycontext.externalInference.setMode({ externalOnly })),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.externalInference })
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.distillProgress })
+    },
   })
 }
 
@@ -1885,11 +1919,13 @@ export function useKlServerStatus(): KlServerStatus | null {
  * 所以必须能精确地对某一个渠道重试。不给 = 全部。
  */
 export function useKlServerStart() {
+  const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (channelId?: string) =>
       unwrap(
         await window.mycontext.kl.serverStart(channelId === undefined ? undefined : { channelId }),
       ),
+    onSettled: () => invalidateKlGraphQueries(queryClient),
   })
 }
 
@@ -1929,9 +1965,18 @@ export function useKlGraphBuild() {
      * 看起来就是"跑完了但什么都没建出来"。
      */
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ["kl", "graph-overview"] })
+      invalidateKlGraphQueries(queryClient)
     },
   })
+}
+
+/**
+ * 图谱进程生命周期变化后，数字概览与关系图必须一起失效。
+ * 两组 key 都带渠道尾段，因此按前缀失效可覆盖当前和非当前渠道的旧缓存。
+ */
+function invalidateKlGraphQueries(queryClient: ReturnType<typeof useQueryClient>): void {
+  void queryClient.invalidateQueries({ queryKey: ["kl", "graph-overview"] })
+  void queryClient.invalidateQueries({ queryKey: ["kl", "graph-ego"] })
 }
 
 /**

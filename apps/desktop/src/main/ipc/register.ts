@@ -27,6 +27,8 @@ import {
   clearCachesInputSchema,
   distillSourceSaveInputSchema,
   distillStartInputSchema,
+  externalInferenceWorkerInputSchema,
+  externalInferenceModeInputSchema,
   personaConfigSaveInputSchema,
   personaDraftResolveInputSchema,
   personaComposeSendInputSchema,
@@ -73,6 +75,7 @@ import type { ActiveIdentityService } from "../services/active-identity.service.
 import type { OnboardingService } from "../services/onboarding.service.js"
 import type { DistillSourceService } from "../services/distill-source.service.js"
 import type { DistillService } from "../services/distill.service.js"
+import type { ExternalInferenceService } from "../services/external-inference.service.js"
 import type { MediaService } from "../services/media.service.js"
 import type { MultiMediaService } from "../services/multi-media.service.js"
 import { toLocalFileUrl } from "../windows/local-file-url.js"
@@ -104,6 +107,7 @@ export interface IpcDependencies {
   onboarding: OnboardingService
   distillSources: DistillSourceService
   distill: DistillService
+  externalInference: ExternalInferenceService
   persona: PersonaService
   media: MediaService
   /**
@@ -237,6 +241,7 @@ export function registerIpc(deps: IpcDependencies): void {
     onboarding,
     distillSources,
     distill,
+    externalInference,
     persona,
     media,
     mediaByChannel,
@@ -539,6 +544,24 @@ export function registerIpc(deps: IpcDependencies): void {
     attempt(() => distill.start(parse(distillStartInputSchema, payload))),
   )
   ipcMain.handle(IPC_CHANNELS.distillReset, () => attempt(() => distill.reset()))
+
+  // ---------------- 外部推理 worker ----------------
+
+  ipcMain.handle(IPC_CHANNELS.externalInferenceStatus, () =>
+    attempt(() => externalInference.statusView()),
+  )
+  ipcMain.handle(IPC_CHANNELS.externalInferenceHandoff, (_event, payload: unknown) =>
+    attempt(() =>
+      externalInference.handoff(parse(externalInferenceWorkerInputSchema, payload).workerId),
+    ),
+  )
+  ipcMain.handle(IPC_CHANNELS.externalInferenceSetMode, (_event, payload: unknown) =>
+    attempt(() =>
+      externalInference.setExternalOnly(
+        parse(externalInferenceModeInputSchema, payload).externalOnly,
+      ),
+    ),
+  )
 
   // ---------------- 数字人 ----------------
 

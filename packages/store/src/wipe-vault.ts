@@ -72,6 +72,7 @@ export const VAULT_DATA_TABLES: readonly string[] = [
   "dh_agent_sessions",
 
   // 蒸馏产物与任务（画像可从语料重建，而语料正在被清）
+  "external_inference_jobs",
   "distill_tasks",
   "profile_facet_revisions",
   "profile_facets",

@@ -143,6 +143,31 @@ describe("KL 三项回退主配置", () => {
     expect(v.klEffective.apiKeyConfigured).toBe(true)
     ctx.close()
   })
+
+  it("最终生效视图与 KL 启动快照同源，GUI 保存值不被残留 KL_LLM_MODEL 覆盖", () => {
+    const env: NodeJS.ProcessEnv = {
+      ANTHROPIC_BASE_URL: "https://legacy-gateway.example/v1",
+      ANTHROPIC_AUTH_TOKEN: "legacy-secret",
+      KL_LLM_MODEL: "stale-hidden-model",
+    }
+    const ctx = makeService(loadConfig({ env: {} }), env)
+    ctx.service.save({ klModelMain: "saved-kl-model" }, NOW)
+
+    const launch = ctx.service.resolvedKlGateway()
+    const view = ctx.service.view()
+    const effective = view.klEffective
+    expect(launch.llmModel).toBe("saved-kl-model")
+    expect(effective.model).toBe(launch.llmModel)
+    expect(effective.modelSource).toBe("user")
+    expect(effective.baseUrl).toBe("https://legacy-gateway.example/v1")
+    expect(view.llmBaseUrl.source).toBe("env")
+    expect(effective.baseUrlSource).toBe("inheritedMain")
+    expect(effective.apiKeyConfigured).toBe(true)
+    expect(view.llmApiKey.source).toBe("env")
+    expect(effective.apiKeySource).toBe("inheritedMain")
+    expect(JSON.stringify(effective)).not.toContain("legacy-secret")
+    ctx.close()
+  })
 })
 
 describe("脱敏", () => {

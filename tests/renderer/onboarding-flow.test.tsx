@@ -316,10 +316,23 @@ function installApi(steps: OnboardingStepView[]): Recorded {
           embedSendDimensions: { value: true, source: "default" as const },
           klEffective: {
             baseUrl: "",
+            baseUrlSource: "inheritedMain" as const,
             model: "glm-5.2",
+            modelSource: "inheritedMain" as const,
             apiKeyConfigured: false,
+            apiKeySource: "inheritedMain" as const,
             provider: "openai" as const,
+            providerSource: "default" as const,
             embedBaseUrl: "",
+            embedBaseUrlSource: "inheritedKl" as const,
+            embedModel: "text-embedding-v4",
+            embedModelSource: "default" as const,
+            embedApiKeyConfigured: false,
+            embedApiKeySource: "inheritedKl" as const,
+            embeddingDim: 2048,
+            embeddingDimSource: "default" as const,
+            sendDimensions: true,
+            sendDimensionsSource: "default" as const,
           },
         }),
       save: () => ok({ appliedNow: true, needsRestart: [] as ("agent" | "klServer")[] }),
@@ -415,8 +428,10 @@ describe("★ 模型那一步：用交互承载信息，不是堆 tips", () => {
     await waitFor(() => {
       expect(screen.getAllByLabelText("接口地址").length).toBeGreaterThan(0)
     })
-    // 桩里 configured:false → 显示「未配置」这个短标签
-    expect(screen.getByText("未配置")).toBeTruthy()
+    // 桩里 configured:false → 至少有一个「未配置」短标签；最终配置摘要也会显示同文案。
+    expect(
+      screen.getAllByText("未配置").some((element) => element.className.includes("rounded-full")),
+    ).toBe(true)
     // 首版那句整行描述不该还在
     expect(screen.queryByText(/尚未配置/)).toBeNull()
   })

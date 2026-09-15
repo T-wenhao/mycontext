@@ -798,75 +798,68 @@ export class KlServerService {
       before,
     })
     this.setBuilding(true)
-    /**
-     * ★ `fresh=true` 是**唯一**还需要先停 server 的路径。
-     *
-     * 增量建图现在交给跑着的 server（`POST /ingest`，见下），不用停它 ——
-     * 干活的就是 server 自己，同一个 Qdrant writer，所以"两个进程抢文件"
-     * 那个前提没有了。好处是建图期间检索不中断、也不用重付 ~90s 的 warmup。
-     *
-     * 但"清空重来"要**删文件**（knowledge.db / qdrant_data / extraction_cache），
-     * 而那些文件正被 server 以 mmap 打开着。删一个打开着的 mmap 在 macOS 上
-     * 不会立刻报错，而是留下一个已 unlink 但仍被映射的旧页面：server 继续读
-     * 旧数据、新 ingest 往新文件写，两边永远对不上，而且没有任何报错。
-     *
-     * 所以顺序必须是：停 → 删 → （下面 ensureReady 把它起回来）→ POST /ingest。
-     */
-    if (fresh) {
-      await this.stop()
-      this.wipeGraphData()
-    } else {
-      /**
-       * ★★★ 增量建图之前先看一眼：现有图库是不是**上游改名之前**建的。
-       *
-       * ## 这一条修的是「建图按钮从此一直失败，而错误信息指不到原因」
-       *
-       * 上游把 `facts.source_message_id` 改名成 `source_chunk_id`
-       * （外键也从 messages 改指 chunks），**没有配数据迁移** ——
-       * 新库建出来是新 schema，而任何在那之前建过图的库都是旧的。
-       * 于是每次增量建图都在 kl 侧抛：
-       *
-       *     table facts has no column named source_chunk_id
-       *
-       * 实测（本机 2026-08-10）：钉钉那栏能建（我为查问题手动清过库），
-       * 飞书那栏必失败（从没清过）—— 同一份代码、同一个按钮，
-       * 差别只在库是哪个版本建的。
-       *
-       * ## 为什么在这里拦，而不是让它抛
-       *
-       * 那条 SQL 错误对用户毫无意义：他看到的是「建图失败：table facts
-       * has no column named source_chunk_id」，而**该做的事**（点旁边那个
-       * 「重建」）完全没有出现在信息里。更糟的是它每次都失败，
-       * 于是「知识图谱」这块功能对老用户彻底不可用而看不出为什么。
-       *
-       * ★ 不自动清库重建。那是**不可逆**的（删图 + 删抽取缓存，重抽要几十
-       * 分钟、还要花 LLM 的钱），必须是用户的显式动作 ——
-       * 与 `fresh=true` 只由「重建」按钮触发同一条原则。
-       */
-      const stale = this.detectStaleGraphSchema()
-      if (stale !== null) {
-        /**
-         * ★★ 必须复位 `building` —— 这条 early-return 在 `setBuilding(true)`
-         * **之后**。
-         *
-         * 忘了它的表现（本机实测，就是这个 bug 的第一版）：飞书那栏的按钮
-         * 永远显示「建图中」，而 kl 侧 3 毫秒前就已经失败了 —— 界面上那个
-         * 转圈会一直转下去，用户以为在跑（"飞书一共才那么点消息，是不是卡住了"）。
-         *
-         * ★ 这个类里每一条从 `rebuildGraph` 返回的路径都要经过
-         * `setBuilding(false)`，无一例外 —— 见其余几处 return 前的同一句。
-         */
-        this.setBuilding(false)
-        return this.logBuildOutcome(fresh, {
-          ok: false,
-          reason: stale,
-          entities: 0,
-          facts: 0,
-          edges: 0,
-        })
-      }
-    }
     try {
+      /**
+       * ★ `fresh=true` 是**唯一**还需要先停 server 的路径。
+       *
+       * 增量建图现在交给跑着的 server（`POST /ingest`，见下），不用停它 ——
+       * 干活的就是 server 自己，同一个 Qdrant writer，所以"两个进程抢文件"
+       * 那个前提没有了。好处是建图期间检索不中断、也不用重付 ~90s 的 warmup。
+       *
+       * 但"清空重来"要**删文件**（knowledge.db / qdrant_data / extraction_cache），
+       * 而那些文件正被 server 以 mmap 打开着。删一个打开着的 mmap 在 macOS 上
+       * 不会立刻报错，而是留下一个已 unlink 但仍被映射的旧页面：server 继续读
+       * 旧数据、新 ingest 往新文件写，两边永远对不上，而且没有任何报错。
+       *
+       * 所以顺序必须是：停 → 删 → （下面 ensureReady 把它起回来）→ POST /ingest。
+       *
+       * ★ 这段必须在 `try` 内：Windows 上文件句柄释放有竞态，清库可能抛
+       * `EPERM`。若异常越过清理逻辑，`building` 会永久停在 true，后续每轮
+       * 都误报 build-in-progress，即使 kl `/status` 明明已经 idle。
+       */
+      if (fresh) {
+        await this.stop()
+        this.wipeGraphData()
+      } else {
+        /**
+         * ★★★ 增量建图之前先看一眼：现有图库是不是**上游改名之前**建的。
+         *
+         * ## 这一条修的是「建图按钮从此一直失败，而错误信息指不到原因」
+         *
+         * 上游把 `facts.source_message_id` 改名成 `source_chunk_id`
+         * （外键也从 messages 改指 chunks），**没有配数据迁移** ——
+         * 新库建出来是新 schema，而任何在那之前建过图的库都是旧的。
+         * 于是每次增量建图都在 kl 侧抛：
+         *
+         *     table facts has no column named source_chunk_id
+         *
+         * 实测（本机 2026-08-10）：钉钉那栏能建（我为查问题手动清过库），
+         * 飞书那栏必失败（从没清过）—— 同一份代码、同一个按钮，
+         * 差别只在库是哪个版本建的。
+         *
+         * ## 为什么在这里拦，而不是让它抛
+         *
+         * 那条 SQL 错误对用户毫无意义：他看到的是「建图失败：table facts
+         * has no column named source_chunk_id」，而**该做的事**（点旁边那个
+         * 「重建」）完全没有出现在信息里。更糟的是它每次都失败，
+         * 于是「知识图谱」这块功能对老用户彻底不可用而看不出为什么。
+         *
+         * ★ 不自动清库重建。那是**不可逆**的（删图 + 删抽取缓存，重抽要几十
+         * 分钟、还要花 LLM 的钱），必须是用户的显式动作 ——
+         * 与 `fresh=true` 只由「重建」按钮触发同一条原则。
+         */
+        const stale = this.detectStaleGraphSchema()
+        if (stale !== null) {
+          return this.logBuildOutcome(fresh, {
+            ok: false,
+            reason: stale,
+            entities: 0,
+            facts: 0,
+            edges: 0,
+          })
+        }
+      }
+
       /**
        * ★ 建图交给**跑着的 server**（`POST /ingest`），不再另起一个进程。
        *
@@ -889,7 +882,6 @@ export class KlServerService {
       // 否则补好依赖后仍必须先另点一次“重试”或重启应用，建图按钮会持续失败。
       const ready = this.state === "failed" ? await this.retry() : await this.ensureReady()
       if (!ready) {
-        this.setBuilding(false)
         return this.logBuildOutcome(fresh, {
           ok: false,
           reason: this.reason ?? "kl-server 未就绪，无法建图",
@@ -914,7 +906,6 @@ export class KlServerService {
        * （服务对查询仍是可用的，见 `building` 的契约注释）。
        */
       if (this.adopted) {
-        this.setBuilding(false)
         return this.logBuildOutcome(fresh, {
           ok: false,
           reason:
@@ -928,7 +919,6 @@ export class KlServerService {
 
       const started = await this.postIngest(this.exportDir)
       if (started !== null) {
-        this.setBuilding(false)
         /**
          * ★ **不调 `fail()`** —— 那会把服务状态置成 failed 并写 `reason`,
          * 而 UI 的「图谱服务」区渲染的正是 `reason`。于是**建图**失败会显示成
@@ -952,7 +942,6 @@ export class KlServerService {
        * 就报"建好了 0 个实体"，而那是本项目里最典型的静默失败形态。
        */
       const outcome = await this.awaitIngest()
-      this.setBuilding(false)
       /**
        * ★★ 被主动打断 → **不是失败**，早于 error 判断返回。
        *
@@ -1026,7 +1015,6 @@ export class KlServerService {
         volume: this.rememberVolume(computeBuildVolume(before, outcome, outcome.volume)),
       })
     } catch (error) {
-      this.setBuilding(false)
       const detail = error instanceof Error ? error.message : String(error)
       // 同上:建图异常不污染服务状态(服务可能仍在正常提供检索)。
       return this.logBuildOutcome(fresh, {
@@ -1036,6 +1024,10 @@ export class KlServerService {
         facts: 0,
         edges: 0,
       })
+    } finally {
+      // ★ 所有出口统一释放互斥锁；尤其覆盖 stop/wipe 的 EPERM 与未来新增的 early-return。
+      this.buildProgress = null
+      this.setBuilding(false)
     }
   }
 
@@ -2695,6 +2687,26 @@ export class KlServerService {
 
     const gw = this.options.gateway?.()
     if (gw !== undefined) {
+      /**
+       * `gateway()` 已是 GUI 与启动共用的最终快照；先清掉父进程里残留的旧值，
+       * 才能保证空值也真的生效。否则用户清空某项后，复制自 `process.env` 的
+       * `KL_*` 或协议密钥仍会悄悄接管子进程。
+       */
+      for (const key of [
+        "KL_LLM_BASE_URL",
+        "KL_LLM_MODEL",
+        "KL_LLM_PROVIDER",
+        "KL_LLM_FLASH_PROVIDER",
+        "KL_EMBED_BASE_URL",
+        "KL_EMBED_MODEL",
+        "KL_EMBED_API_KEY",
+        "KL_EMBEDDING_DIM",
+        "KL_EMBED_SEND_DIMENSIONS",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+      ]) {
+        delete env[key]
+      }
       // LLM：传**裸模型名**与 base，协议由 KL_LLM_PROVIDER 声明 —— kl 侧的
       // litellm_config.py 按 provider 规整 base（anthropic 剥 /v1、openai 补一个 /v1）
       // 并拼出对的 provider 前缀。见下面 KL_LLM_PROVIDER 的注释。
@@ -3288,7 +3300,7 @@ async function defaultPostIngest(
 /**
  * 读 `/status` 的 ingest 段 + 图规模。
  *
- * ★ 图规模取 `sqlite`（entities/facts/edges）而不是解析 stdout 的计数行：
+ * ★ 图规模取当前服务的 `knowledge`（并兼容旧版 `sqlite`）而不是解析 stdout：
  * 那些行只在 ingest 进程的输出里，而现在 ingest 跑在 server 内 ——
  * 它的 stdout 是 server 的日志流，我们不该去解析它（格式一变就静默归零）。
  */
@@ -3308,10 +3320,12 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
       units_processed?: number
       chunks_created?: number
     }
+    knowledge?: { entities?: number; facts?: number; edges?: number }
     sqlite?: { entities?: number; facts?: number; edges?: number }
   }
   const ingest = body.ingest ?? {}
-  const sqlite = body.sqlite ?? {}
+  // 当前 kl-server 已把这段改名为 knowledge；保留 sqlite 兼容旧数据面版本。
+  const knowledge = body.knowledge ?? body.sqlite ?? {}
   const state = ingest.state
   return {
     state:
@@ -3322,9 +3336,9 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
     percent: ingest.percent ?? 0,
     error: ingest.error ?? "",
     counts: {
-      entities: sqlite.entities ?? 0,
-      facts: sqlite.facts ?? 0,
-      edges: sqlite.edges ?? 0,
+      entities: knowledge.entities ?? 0,
+      facts: knowledge.facts ?? 0,
+      edges: knowledge.edges ?? 0,
     },
     /**
      * ★ 上游是 snake_case（`units_discovered`），这里转成我们的 camelCase。

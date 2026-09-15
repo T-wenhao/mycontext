@@ -44,6 +44,8 @@ export interface VaultTeardownDeps {
    */
   search: { shutdown(): Promise<unknown>; detach(): void }
   media: { detach(): void }
+  /** 外部 worker 的 loopback MCP 与凭据，必须在关库前撤销。 */
+  externalInference?: { detach(): Promise<unknown> }
   distill: { detach(): Promise<unknown> }
   persona: { detach(): Promise<unknown> }
   /**
@@ -113,6 +115,10 @@ export async function teardownVault(deps: VaultTeardownDeps): Promise<void> {
       deps.search.detach()
     })
   deps.media.detach()
+
+  await deps.externalInference?.detach().catch((error: unknown) => {
+    deps.logger.warn("external inference detach failed", { detail: describe(error) })
+  })
 
   // ② 两个持定时器且会写库的
   await deps.distill.detach().catch((error: unknown) => {

@@ -69,8 +69,9 @@
       "runtime": "Runtime",
       "paths": "Data directories",
       "database": "Database (migrated to v{{version}})",
-      "config": "Configuration",
+      "config": "Configuration (startup base layer)",
       "dataPlane": "Data plane",
+      "externalInference": "External inference",
       "kl": "Knowledge graph (kl)"
     },
     "runtime": {
@@ -103,7 +104,7 @@
       "configured": "Configured (value hidden)",
       "notConfigured": "Not configured",
       "empty": "(empty)",
-      "note": "Precedence: built-in default < .env file < environment variable. Secrets only show whether they are configured.",
+      "note": "This table only shows the startup base layer: built-in default < .env file < environment variable. The final runtime value may also be overridden by saved database settings; see Effective configuration under Settings → Model service. Secrets only show whether they are configured.",
       "sources": {
         "default": "Built-in default",
         "dotenv": ".env file",
@@ -150,6 +151,21 @@
         "dingtalk": "DingTalk",
         "feishu": "Feishu"
       }
+    },
+    "externalInference": {
+      "description": "Hand expensive distillation to a local agent you choose. MyContext supplies bounded evidence and keeps validation and writes host-owned. It never falls back to a paid model automatically.",
+      "loading": "Loading external job status…",
+      "unavailable": "The external inference host is not attached.",
+      "enabled": "External only",
+      "disabled": "Disabled",
+      "prepare": "Prepare handoff",
+      "stop": "Stop and revoke",
+      "pending": "Pending",
+      "leased": "Running",
+      "committed": "Committed",
+      "failed": "Failed",
+      "handoffPath": "Handoff manifest",
+      "handoffHint": "Give only this manifest path to the agent you selected. Stopping immediately revokes its credential and active leases."
     },
     "topology": {
       "title": "Data plane",
@@ -438,7 +454,8 @@
       "dimHint": "Must match the width the model actually returns — a wrong value crashes the vector store on write rather than merely slowing things down. Verify against a real response after switching models.",
       "sendDimensions": "Send the dimensions parameter",
       "sendDimensionsHint": "Truncate to the dimension above (matryoshka). Self-hosted embedding servers such as vLLM usually reject this parameter — turn it off for those.",
-      "noneOnGateway": "This gateway has no embedding model — graph building will stall at the vectorize step. Point embeddings at a service that provides them under \"Use a separate endpoint for embeddings\" below."
+      "noneOnGateway": "This gateway has no embedding model — graph building will stall at the vectorize step. Point embeddings at a service that provides them under \"Use a separate endpoint for embeddings\" below.",
+      "customModel": "Embedding model (custom)"
     },
     "kl": {
       "title": "Use a different model for the knowledge base",
@@ -453,6 +470,29 @@
     "keyOff": "Not configured",
     "keyTail": "Configured …{{tail}}",
     "other": "Other…",
+    "effective": {
+      "title": "Effective configuration",
+      "hint": "The values resolved by the main process after merging saved settings, environment variables, .env, and built-in defaults. Unsaved drafts are excluded; secrets only show availability.",
+      "main": "Main model",
+      "knowledge": "Knowledge extraction",
+      "embedding": "Embeddings",
+      "endpoint": "Endpoint",
+      "model": "Model",
+      "protocol": "Protocol",
+      "key": "Key",
+      "dimension": "Dimension",
+      "sendDimensions": "dimensions parameter",
+      "send": "Sent",
+      "omit": "Omitted",
+      "sources": {
+        "user": "Saved setting",
+        "env": "Environment",
+        "dotenv": ".env",
+        "default": "Built-in default",
+        "inheritedMain": "Follows main",
+        "inheritedKl": "Follows knowledge base"
+      }
+    },
     "probe": {
       "test": "Test connection",
       "testing": "Testing…",
