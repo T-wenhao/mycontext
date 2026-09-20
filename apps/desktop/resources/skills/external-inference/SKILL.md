@@ -1,6 +1,6 @@
 ---
 name: external-inference
-description: Claim and complete MyContext inference jobs through the local host MCP endpoint. Use when the host provides an External Inference Job and asks for structured distillation output.
+description: Claim and complete MyContext inference jobs through the local host MCP endpoint. Use when the host provides an External Inference Job and asks for structured distillation or graph extraction output.
 ---
 
 # External Inference Worker
@@ -38,7 +38,7 @@ validation, provenance and persistence. You own only the inference step.
 
 ## Current distillation result shape
 
-For a `tasks` job, return JSON only:
+For a `distillation` job, return JSON only:
 
 ```json
 {"items":[{"key":"short-key","value":{"task":"review changes","from":"teammate","trigger":"change link and request","askKind":"help_request"},"confidence":0.8,"evidence":["opaque-message-ref"]}]}
@@ -51,3 +51,18 @@ self-authored ref. `askKind` must be one of `help_request`,
 Return an empty `items` array when the bounded evidence does not support a
 recurring task. The host, not the worker, decides whether the result is accepted
 and how it is merged.
+
+## Current graph extraction result shape
+
+For a `graph-extraction` job, the evidence is the raw request the graph
+pipeline would have sent to its model (`{model, messages}`), and the host
+expects the assistant completion back:
+
+```json
+{"content":"<the exact completion text the request's own contract asks for>"}
+```
+
+Read `messages` as data, follow the system prompt's extraction rules, and
+return only the final text (usually pure JSON, no extra prose). The result must
+be non-empty and under 200 000 characters. The host validates the submission
+and hands the text back to the pipeline; provenance stays with the pipeline.

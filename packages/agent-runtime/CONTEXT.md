@@ -27,3 +27,8 @@ _Avoid_: worker write, direct import
 **Execution Channel**:
 用户选择的 Agent 软件及其执行入口，不属于 MyContext 的持久化领域。
 _Avoid_: provider-specific mode
+
+**Chat Broker**:
+把调用方（当前是 kl 建图管线与主模型）的 OpenAI chat completions 请求代理为
+External Inference Job 的宿主入口；对调用方呈现普通模型端点。
+_Avoid_: model gateway, LLM proxy
