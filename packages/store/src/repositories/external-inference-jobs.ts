@@ -9,8 +9,12 @@ export const EXTERNAL_INFERENCE_JOB_STATES = [
 ] as const
 export type ExternalInferenceJobState = (typeof EXTERNAL_INFERENCE_JOB_STATES)[number]
 
-/** T01 只发布蒸馏任务；图谱抽取留到后续阶段。 */
-export type ExternalInferenceDomainKind = "distillation"
+/**
+ * T01 交付蒸馏（distillation）；T02 起图谱抽取（graph-extraction）复用同一
+ * 协议：kl 建图 Phase B 的每次 LLM 抽取调用由宿主代理为外部 Job，worker 提交
+ * 的补全文本经宿主校验后原样返回给 kl。
+ */
+export type ExternalInferenceDomainKind = "distillation" | "graph-extraction"
 
 /**
  * 运行时协议的最小载荷。
@@ -112,7 +116,7 @@ interface RawRow {
 }
 
 const STATE_SET = new Set<string>(EXTERNAL_INFERENCE_JOB_STATES)
-const DOMAIN_SET = new Set<string>(["distillation"])
+const DOMAIN_SET = new Set<string>(["distillation", "graph-extraction"])
 const DEFAULT_LEASE_MS = 10 * 60_000
 const DEFAULT_MAX_ATTEMPTS = 3
 

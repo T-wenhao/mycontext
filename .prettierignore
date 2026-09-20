@@ -14,3 +14,6 @@ vendor/
 
 # 从 kl-graph/ 同步过来的产物：内容仍归他人所有，格式化会让 check:kl-skill-sync 永远红
 apps/desktop/resources/skills/
+
+# ZCode 会话产物（计划/临时文件），不属于仓库
+.zcode/

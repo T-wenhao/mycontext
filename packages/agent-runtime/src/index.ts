@@ -66,6 +66,8 @@ export { buildKlSkillMarkdown, KL_SKILL_RELPATH } from "./kl-skill.js"
 export {
   ExternalInferenceCredentialAuthority,
   ExternalInferenceMcpServer,
+  EXTERNAL_INFERENCE_BROKER_WORKER_ID,
+  EXTERNAL_INFERENCE_CHAT_PATH,
   EXTERNAL_INFERENCE_MCP_PATH,
   EXTERNAL_INFERENCE_TOOLS,
 } from "./external-inference-server.js"

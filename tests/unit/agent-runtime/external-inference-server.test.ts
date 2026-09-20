@@ -43,7 +43,7 @@ async function request(
   token: string | undefined,
   body: unknown,
   headers: Record<string, string> = {},
-): Promise<{ status: number; body: any }> {
+): Promise<{ status: number; body: unknown }> {
   const response = await fetch(server.url, {
     method: "POST",
     headers: {
@@ -57,7 +57,7 @@ async function request(
   return { status: response.status, body: text === "" ? null : JSON.parse(text) }
 }
 
-function toolText(body: any): any {
+function toolText(body: Record<string, unknown>): string | null {
   const result = body.result
   const text = result?.content?.[0]?.text
   return text === undefined ? undefined : JSON.parse(text)

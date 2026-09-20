@@ -15,6 +15,7 @@ import {
   ExternalInferenceJobError,
   ExternalInferenceJobRepository,
   type ExternalInferenceClaim,
+  type ExternalInferenceDomainKind,
   type ExternalInferenceEvidence,
   type ExternalInferenceJobRow,
   type ExternalInferenceJobStatus,
@@ -278,6 +279,12 @@ export class ExternalInferenceDistillHost implements ExternalInferenceWorkerHost
         code: errorCode(error),
       })
     }
+  }
+
+  /** T02：组合宿主按 Job 的 domain 分派 submit；只认自己的 domain。 */
+  jobDomain(jobId: string): ExternalInferenceDomainKind | null {
+    const row = this.jobs.findById(jobId)
+    return row === null ? null : row.domainKind
   }
 
   status(): ExternalInferenceJobStatus {

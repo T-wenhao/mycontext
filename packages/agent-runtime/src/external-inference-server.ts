@@ -8,6 +8,8 @@ import {
 } from "@mycontext/store"
 
 export const EXTERNAL_INFERENCE_MCP_PATH = "/mcp"
+export const EXTERNAL_INFERENCE_CHAT_PATH = "/v1/chat/completions"
+export const EXTERNAL_INFERENCE_BROKER_WORKER_ID = "kl-graph-extraction-broker"
 export const EXTERNAL_INFERENCE_TOOLS = {
   claim: "external_inference_claim",
   heartbeat: "external_inference_heartbeat",
@@ -94,6 +96,16 @@ export interface ExternalInferenceMcpServerOptions {
   port?: number
   credentials?: ExternalInferenceCredentialAuthority
   maxBodyBytes?: number
+  /**
+   * 图谱抽取代理（T02）：external-only 模式下，kl 建图 Phase B 的 litellm
+   * 抽取调用打到 `/v1/chat/completions`，由实现方把请求体发布为
+   * graph-extraction 外部 Job，等待 worker 提交并校验后原样返回补全文本。
+   * 实现方自己负责幂等（按请求内容去重）与等待超时。
+   */
+  chatBroker?: {
+    /** 处理一条 chat completion 请求，返回透传给调用方的状态码与响应体。 */
+    handleChatCompletion(body: unknown): Promise<{ status: number; body: unknown }>
+  }
 }
 
 interface RpcRequest {
@@ -182,6 +194,10 @@ export class ExternalInferenceMcpServer {
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.url === EXTERNAL_INFERENCE_CHAT_PATH) {
+      await this.handleChatCompletion(request, response)
+      return
+    }
     if (request.url !== EXTERNAL_INFERENCE_MCP_PATH) {
       this.writeJson(response, 404, { error: "not_found" })
       return
@@ -250,6 +266,46 @@ export class ExternalInferenceMcpServer {
             : JSON_RPC_INTERNAL_ERROR
       this.options.logger?.warn("external inference operation rejected", { method, code })
       this.writeRpcError(response, id, rpcCode, code.toLowerCase(), code)
+    }
+  }
+
+  /**
+   * 图谱抽取代理入口：kl 的 litellm 抽取调用（OpenAI chat completions 形状）。
+   *
+   * 与 /mcp 一样只允许本机 + Bearer（broker 用独立的 purpose credential，由
+   * desktop 组装 kl 环境时注入），拒绝带 Origin 的浏览器跨源调用。请求体上限
+   * 与 MCP 一致；未配置 broker 时保持 404，协议面不扩大。
+   */
+  private async handleChatCompletion(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    if (this.options.chatBroker === undefined) {
+      this.writeJson(response, 404, { error: "not_found" })
+      return
+    }
+    if (request.method !== "POST") {
+      this.writeJson(response, 405, { error: "method_not_allowed" })
+      return
+    }
+    if (request.headers.origin !== undefined) {
+      this.writeJson(response, 403, { error: "forbidden_origin" })
+      return
+    }
+    const workerId = this.authorize(request)
+    if (workerId === null) {
+      this.writeJson(response, 401, { error: "unauthorized" })
+      return
+    }
+    const body = await readJsonBody(request, this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES)
+    try {
+      const handled = await this.options.chatBroker.handleChatCompletion(body)
+      this.writeJson(response, handled.status, handled.body)
+    } catch (error) {
+      this.options.logger?.warn("external inference chat broker failed", {
+        code: errorCode(error),
+      })
+      this.writeJson(response, 500, { error: "internal" })
     }
   }
 

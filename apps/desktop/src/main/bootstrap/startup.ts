@@ -903,6 +903,12 @@ export function bootstrapApp(mainDir: string): AppContext {
   })
 
   const externalInferenceRef: { current: ExternalInferenceService | null } = { current: null }
+  /**
+   * T02：external-only 开关要通知各渠道 kl 重启（函数声明提升，装配顺序无关）。
+   */
+  function notifyPipelinesExternalMode(_enabled: boolean): void {
+    for (const item of pipelines.all()) void item.parts.klServer.onGatewayChanged()
+  }
   const distill = new DistillService({
     clock: systemClock,
     logger: logger.child("Distill"),
@@ -1005,10 +1011,36 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("ExternalInference"),
     getForbiddenTerms: () => distill.externalInferenceForbiddenTerms(),
     getConversationScope: () => distill.externalInferenceConversationScope(),
-    onExternalOnlyEnabled: () => void distill.refreshWorkLayer(),
+    /**
+     * T02：external-only 开关同时改变 kl 建图的 LLM 端点（klGateway 会读到
+     * 图谱 broker），指纹变化后让 kl 携带新 env 重启；关闭时同理还原网关。
+     */
+    onExternalOnlyChanged: (enabled) => {
+      void distill.refreshWorkLayer()
+      void klServerRef?.onGatewayChanged()
+      notifyPipelinesExternalMode(enabled)
+      logger.info("external inference mode changed kl gateway", { enabled })
+    },
     onHostCommit: () => distill.finalizeExternalInferenceRound(),
   })
   externalInferenceRef.current = externalInference
+
+  /**
+   * T02：kl 建图用的网关推导。external-only 时 LLM 一侧改道本进程的图谱
+   * 抽取 broker（外部 Agent 完成推理），embedding 保持用户配置不变。
+   * 主 klServer 与各渠道 klServer 共用这一份 —— 改一处两边都变。
+   */
+  const klGateway = () => {
+    const gw = runtimeConfig.resolvedKlGateway()
+    const broker = externalInferenceRef.current?.chatBrokerEndpoint() ?? null
+    if (broker === null) return gw
+    return {
+      ...gw,
+      llmBaseUrl: broker.baseUrl,
+      apiKey: broker.apiKey,
+      llmProvider: "openai" as const,
+    }
+  }
 
   /**
    * kl-server 端口：KlServerService 起在这里，两条 agent 路径（SearchService
@@ -1287,11 +1319,11 @@ export function bootstrapApp(mainDir: string): AppContext {
     /**
      * embedding/LLM 走网关（出网边界，UI 明示）。
      *
-     * ★ 函数：每次 spawn 现读 `runtimeConfig.resolved()` 的 **KL 三项**
-     * （留空回退主配置）。用户在设置里改了网关后，下次 kl 重启就用新值。
+     * ★ 函数：每次 spawn 现读 klGateway（external-only 时 LLM 侧改道图谱
+     * 抽取 broker，见其注释）。用户在设置里改了网关后，下次 kl 重启就用新值。
      */
     gateway: () => {
-      return runtimeConfig.resolvedKlGateway()
+      return klGateway()
     },
     /**
      * 自动建图的调度快照 → `graphOverview().buildSchedule`（界面上
@@ -1376,8 +1408,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     }
   }
 
-  /** 网关配置：主渠道与各渠道共用同一份推导（改一处两边都变）。 */
-  const klGateway = () => runtimeConfig.resolvedKlGateway()
+  /** 网关配置：主渠道与各渠道共用同一份推导（klGateway，见 externalInference 之后的定义）。 */
 
   const pipelines = new ChannelPipelineManager<ChannelPipelineParts>({
     logger: logger.child("ChannelPipeline"),
@@ -2381,6 +2412,25 @@ export function bootstrapApp(mainDir: string): AppContext {
     if (dataFlowsAllowed) {
       await externalInference
         .attach(handle.db, join(paths.userData, "external-inference", "handoff.json"))
+        .then(() => {
+          /**
+           * T02：主模型与 KL 抽取常态化走图谱 broker（外部 Agent 推理）。
+           * broker 端口每次 attach 动态分配，挂载时无条件把存储覆盖刷新到
+           * 当前端口 —— 设置里的主模型/知识库抽取由此固定为外部 Agent。
+           */
+          const broker = externalInference.chatBrokerEndpoint()
+          if (broker !== null) {
+            void runtimeConfig.save(
+              {
+                llmBaseUrl: broker.baseUrl,
+                llmApiKey: broker.apiKey,
+                klLlmBaseUrl: broker.baseUrl,
+                klLlmApiKey: broker.apiKey,
+              },
+              new Date().toISOString(),
+            )
+          }
+        })
         .catch((error: unknown) => {
           logger.error("external inference attach failed", {
             detail: error instanceof Error ? error.message : String(error),

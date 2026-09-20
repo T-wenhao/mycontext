@@ -226,7 +226,10 @@ export type {
   DistillProgress,
 } from "./repositories/distill-tasks.js"
 
-export { ExternalInferenceJobRepository, ExternalInferenceJobError } from "./repositories/external-inference-jobs.js"
+export {
+  ExternalInferenceJobRepository,
+  ExternalInferenceJobError,
+} from "./repositories/external-inference-jobs.js"
 export type {
   ExternalInferenceClaim,
   ExternalInferenceEvidence,

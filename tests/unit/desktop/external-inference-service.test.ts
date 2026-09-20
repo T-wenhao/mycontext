@@ -39,7 +39,8 @@ describe("ExternalInferenceService", () => {
     expect(handoff.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
     expect(handoff.externalOnly).toBe(true)
     expect(service.statusView().externalOnly).toBe(true)
-    expect(service.statusView().activeCredentials).toBe(1)
+    // T02：broker 专用凭据（kl 图谱抽取用）与 worker 凭据分开签发，各自计数。
+    expect(service.statusView().activeCredentials).toBe(2)
     expect(service.statusView().handoffPath).toBe(handoffFile)
 
     const manifest = JSON.parse(readFileSync(handoffFile, "utf8")) as {

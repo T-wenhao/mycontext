@@ -153,3 +153,6 @@ acp-stream-dump.json
 .agents/
 .hitg_attachments/
 .hitg-attachments/
+
+# ZCode 会话产物
+.zcode/
